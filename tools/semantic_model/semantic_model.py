@@ -1,98 +1,196 @@
 from __future__ import annotations
 
-from os import (
-    mkdir,
-    getcwd,
-)
-from os.path import (
-    exists,
-)
-from typing import (
-    Any,
-    Literal,
-)
-from pathlib import (
-    Path,
-)
-from json import (
-    dump,
-    load,
-)
-from resources.semantic_model.utils import MODELS_PATH
-from rdflib import Graph, Namespace, RDFS, OWL, RDF, SKOS, URIRef, Literal, XSD
-import uuid
-from json import load, dump
-from os.path import exists
 import json
+import re
+import unicodedata
+import uuid
+from pathlib import Path
+from typing import Any
+from xml.etree.ElementTree import Element, SubElement, tostring
 
-if not exists(MODELS_PATH):
-    mkdir(MODELS_PATH)
+from rdflib import Graph, Literal, Namespace, OWL, RDF, RDFS, SKOS, URIRef, XSD
+
+from resources.semantic_model.utils import MODELS_PATH
 
 
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-ttl_to_uml_json.py
-Convert an OWL/RDF ontology in Turtle (TTL) to an Enterprise Architect-like UML JSON.
+BASE_MODELS_PATH = Path(MODELS_PATH)
+BASE_MODELS_PATH.mkdir(parents=True, exist_ok=True)
 
-- Classes (owl:Class)  -> elements of type "uml:Class"
-- ObjectProperties     -> connectors of type "Association" (domain -> range)
-- DatatypeProperties   -> attributes on the domain class
-- rdfs:subClassOf      -> connectors of type "Generalization" (child -> parent)
-- owl:Ontology         -> root Package (name from rdfs:label @en if present)
+UML_META = Namespace("urn:ai4semantics:uml:")
 
-IDs are deterministic per URI (uuid5), prefixed EA-like: EAPK_ for packages, EAID_ for classes.
-"""
-# ---------- Helpers ----------
 
 def ea_id(prefix: str, uri: str) -> str:
-    """
-    EA-like deterministic ID from a URI: EAID/EAPK + UUID5 (underscored groups, uppercased).
-    """
+    """Construit un identifiant stable de type EAID/EAPK à partir d'une URI."""
     u = uuid.uuid5(uuid.NAMESPACE_URL, str(uri))
-    s = str(u).replace('-', '_').upper()
+    s = str(u).replace("-", "_").upper()
     return f"{prefix}_{s}"
 
-def local_name(uri: URIRef) -> str:
-    """
-    Derive a human-friendly name from a URI: last segment after '/' or '#'.
-    """
+
+def local_name(uri: URIRef | str) -> str:
+    """Extrait le nom local d'une URI RDF."""
     s = str(uri)
-    if '#' in s:
-        s = s.split('#')[-1]
-    else:
-        s = s.rstrip('/').split('/')[-1]
-    return s
+    if "#" in s:
+        return s.split("#")[-1]
+    return s.rstrip("/").split("/")[-1]
 
-def get_label(g: Graph, s: URIRef, lang: str = "en") -> str | None:
-    vals = list(g.objects(s, RDFS.label))
+
+def _norm_text(value: Any) -> str | None:
+    """Normalise une valeur texte ; renvoie None si vide."""
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value if value else None
+
+
+def _safe_xmi_value(value: Any) -> str:
+    """Retourne une chaîne sûre pour l'export XMI/XML ; jamais None."""
+    value = _norm_text(value)
+    return value if value is not None else ""
+
+
+def _canonical_text(value: Any) -> str:
+    """Normalise fortement un texte pour les comparaisons souples."""
+    value = _norm_text(value) or ""
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r"\s+", " ", value).strip().casefold()
+    return value
+
+
+def _slugify_uri(value: str) -> str:
+    """Construit un slug sûr pour une URI interne."""
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    value = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-").lower()
+    return value or "generated"
+
+
+def _sanitize_path_component(value: str | None, default: str) -> str:
+    """Nettoie un segment de chemin sans changer sa casse métier."""
+    value = _norm_text(value) or default
+    value = value.replace("\\", "_").replace("/", "_").replace("\x00", "")
+    return value.strip() or default
+
+
+def _find_file(user: str, name: str) -> Path:
+    """Retourne le chemin du fichier modèle JSON pour un utilisateur et un nom de modèle."""
+    safe_user = _sanitize_path_component(user, "default")
+    safe_name = _sanitize_path_component(name, "generated")
+    return BASE_MODELS_PATH / safe_user / f"{safe_name}.json"
+
+
+def get_model_path(user: str = "", name: str = "") -> str:
+    """Retourne le chemin absolu du fichier modèle JSON."""
+    return str(_find_file(user, name))
+
+
+def _model_uri(user: str, name: str) -> URIRef:
+    """Construit l'URI d'ontologie du modèle."""
+    return URIRef(
+        f"urn:ai4semantics:model:{_slugify_uri(user or 'default')}:{_slugify_uri(name or 'generated')}"
+    )
+
+
+def _new_graph(user: str, name: str) -> Graph:
+    """Crée un graphe RDF minimal pour un modèle vide."""
+    g = Graph()
+    g.bind("owl", OWL)
+    g.bind("rdfs", RDFS)
+    g.bind("skos", SKOS)
+    g.bind("uml", UML_META)
+
+    onto = _model_uri(user, name)
+    g.add((onto, RDF.type, OWL.Ontology))
+    g.add((onto, RDFS.label, Literal(name or "Generated", lang="fr")))
+    return g
+
+
+def _first_literal(
+    g: Graph,
+    s: URIRef,
+    p: URIRef,
+    preferred_langs: tuple[str, ...] = ("fr", "en"),
+) -> str | None:
+    """Retourne la meilleure valeur littérale pour un prédicat RDF donné."""
+    vals = list(g.objects(s, p))
     if not vals:
         return None
-    # prefer requested language
+
+    for lang in preferred_langs:
+        for v in vals:
+            if isinstance(v, Literal) and v.language == lang:
+                return str(v)
+
     for v in vals:
-        if isinstance(v, Literal) and v.language == lang:
+        if isinstance(v, Literal):
             return str(v)
-    # fallback to first literal/string
+
     return str(vals[0])
 
-def get_comment(g: Graph, s: URIRef, lang: str = "en") -> str | None:
-    vals = list(g.objects(s, RDFS.comment))
+
+def get_label(g: Graph, s: URIRef) -> str | None:
+    """Retourne le label préféré d'une ressource."""
+    return _first_literal(g, s, RDFS.label)
+
+
+def get_comment(g: Graph, s: URIRef) -> str | None:
+    """Retourne le commentaire préféré d'une ressource."""
+    return _first_literal(g, s, RDFS.comment)
+
+
+def get_scope_note(g: Graph, s: URIRef) -> str | None:
+    """Retourne la scope note / note d'usage préférée d'une ressource."""
+    return _first_literal(g, s, SKOS.scopeNote)
+
+
+def get_literal_value(g: Graph, s: URIRef, p: URIRef) -> str | None:
+    """Retourne la première valeur littérale d'un prédicat, si elle existe."""
+    vals = list(g.objects(s, p))
     if not vals:
         return None
-    for v in vals:
-        if isinstance(v, Literal) and v.language == lang:
-            return str(v)
     return str(vals[0])
+
+
+def _set_literal(
+    g: Graph,
+    s: URIRef,
+    p: URIRef,
+    value: str | None,
+    lang: str | None = None,
+) -> None:
+    """Remplace un littéral RDF en supprimant les anciennes valeurs."""
+    g.remove((s, p, None))
+    value = _norm_text(value)
+    if value is not None:
+        if lang:
+            g.add((s, p, Literal(value, lang=lang)))
+        else:
+            g.add((s, p, Literal(value)))
+
+
+def _set_uri(g: Graph, s: URIRef, p: URIRef, value: URIRef | str | None) -> None:
+    """Remplace une URI RDF en supprimant les anciennes valeurs."""
+    g.remove((s, p, None))
+    if value:
+        g.add((s, p, URIRef(str(value))))
+
+
+def _coerce_class_uri(value: str | None, fallback_label: str) -> URIRef:
+    """Construit une URI de classe à partir d'un ID EA ou d'un label."""
+    value = _norm_text(value)
+    if value and (value.startswith("http://") or value.startswith("https://") or value.startswith("urn:")):
+        return URIRef(value)
+    if value:
+        return URIRef(f"urn:eaid:{value}")
+    return URIRef(f"urn:class:{_slugify_uri(fallback_label)}")
+
 
 def primitive_from_range(r: URIRef) -> str | None:
-    """
-    Map RDF/XSD types to UML primitive names; None means treat as classifier name.
-    Extend as needed.
-    """
+    """Mappe une URI RDF/XSD vers un nom de type simple pour la vue UML."""
     s = str(r)
     if s in (str(RDFS.Literal), str(RDF.langString)):
         return "String"
-    # Common XSD mappings
+
     xsd_map = {
         str(XSD.string): "String",
         str(XSD.boolean): "Boolean",
@@ -105,358 +203,527 @@ def primitive_from_range(r: URIRef) -> str | None:
         str(XSD.date): "Date",
         str(XSD.dateTime): "DateTime",
         str(XSD.time): "Time",
-        str(XSD.gYear): "String",
-        str(XSD.gYearMonth): "String",
         str(XSD.anyURI): "URI",
     }
     return xsd_map.get(s)
 
 
-# Reverse map: friendly/short type names (as callers supply them) → canonical XSD/RDF URIs.
-# Also handles full URIs that are already correct so resolve_type_uri is always safe to call.
 _FRIENDLY_TO_XSD_URI: dict[str, str] = {
-    # Plain labels used in the UML model
-    "string":      str(XSD.string),
-    "text":        str(RDF.langString),   # rdf:langString -> rendered as "Text" in UML
-    "literal":     str(RDFS.Literal),
-    "boolean":     str(XSD.boolean),
-    "integer":     str(XSD.integer),
-    "int":         str(XSD.int),
-    "long":        str(XSD.long),
-    "float":       str(XSD.float),
-    "real":        str(XSD.double),
-    "double":      str(XSD.double),
-    "decimal":     str(XSD.decimal),
-    "date":        str(XSD.date),
-    "datetime":    str(XSD.dateTime),
-    "time":        str(XSD.time),
-    "gyear":       str(XSD.gYear),
-    "gyearmonth":  str(XSD.gYearMonth),
-    "uri":         str(XSD.anyURI),
-    "anyuri":      str(XSD.anyURI),
-    # Custom compound types used by SEMIC / Core Vocabularies
-    "genericdate": str(XSD.date),         # m8g:GenericDate -> nearest XSD equivalent
-    # Short prefixed forms
-    "xsd:string":   str(XSD.string),
-    "xsd:boolean":  str(XSD.boolean),
-    "xsd:integer":  str(XSD.integer),
-    "xsd:int":      str(XSD.int),
-    "xsd:long":     str(XSD.long),
-    "xsd:float":    str(XSD.float),
-    "xsd:double":   str(XSD.double),
-    "xsd:decimal":  str(XSD.decimal),
-    "xsd:date":     str(XSD.date),
+    "string": str(XSD.string),
+    "text": str(RDF.langString),
+    "literal": str(RDFS.Literal),
+    "boolean": str(XSD.boolean),
+    "integer": str(XSD.integer),
+    "int": str(XSD.int),
+    "long": str(XSD.long),
+    "float": str(XSD.float),
+    "real": str(XSD.double),
+    "double": str(XSD.double),
+    "decimal": str(XSD.decimal),
+    "date": str(XSD.date),
+    "datetime": str(XSD.dateTime),
+    "time": str(XSD.time),
+    "uri": str(XSD.anyURI),
+    "xsd:string": str(XSD.string),
+    "xsd:boolean": str(XSD.boolean),
+    "xsd:integer": str(XSD.integer),
+    "xsd:date": str(XSD.date),
     "xsd:dateTime": str(XSD.dateTime),
-    "xsd:time":     str(XSD.time),
-    "xsd:anyURI":   str(XSD.anyURI),
+    "xsd:anyURI": str(XSD.anyURI),
     "rdf:langString": str(RDF.langString),
-    "rdfs:Literal":   str(RDFS.Literal),
+    "rdfs:Literal": str(RDFS.Literal),
 }
 
 
-def resolve_type_uri(attr_type: str) -> tuple[str, bool]:
-    """
-    Given a caller-supplied type string (friendly name, prefixed form, or full URI),
-    return (canonical_uri, is_primitive).
-
-    is_primitive=True  → declare as owl:DatatypeProperty, add rdfs:range with the URI.
-    is_primitive=False → declare as owl:ObjectProperty, add rdfs:range with the URI.
-    """
+def resolve_type_uri(attr_type: str | None) -> tuple[str, bool]:
+    """Résout un type d'attribut en URI canonique et indique si c'est un type primitif."""
+    attr_type = _norm_text(attr_type)
     if not attr_type:
         return ("", False)
 
-    # Already a full URI? Check directly against the primitive map.
     if "://" in attr_type or attr_type.startswith("urn:"):
         prim = primitive_from_range(URIRef(attr_type))
         return (attr_type, prim is not None)
 
-    # Friendly / prefixed name: look up in reverse map (case-insensitive key).
     canonical = _FRIENDLY_TO_XSD_URI.get(attr_type) or _FRIENDLY_TO_XSD_URI.get(attr_type.lower())
     if canonical:
-        return (canonical, True)   # all entries in the map are primitives
+        return (canonical, True)
 
-    # Unknown name — treat as a class URI fragment; caller is responsible for
-    # passing a valid URI in this case.
     return (attr_type, False)
 
-def role_name_from_label(label: str | None) -> str | None:
-    """
-    EA diagrams often show role names like '+isAbout'. We'll prefix with '+' if label exists.
-    """
-    if not label:
-        return None
-    return f"+{label}"
 
-# ---------- Extraction ----------
+def _default_source_format(model: dict[str, Any]) -> str:
+    """Détermine le format source par défaut du modèle."""
+    fmt = _norm_text(model.get("source_format"))
+    if fmt:
+        return fmt.lower()
 
-def extract_ontology_package(g: Graph, custom_name: str | None = None) -> dict:
-    # Identify owl:Ontology subject(s)
+    if model.get("ttl_raw"):
+        return "ttl"
+    return "xmi"
+
+
+def extract_ontology_package(g: Graph, custom_name: str | None = None) -> dict[str, Any]:
+    """Construit l'élément UML racine de type Package à partir de l'ontologie RDF."""
     ontos = list(g.subjects(RDF.type, OWL.Ontology))
     if ontos:
         onto = ontos[0]
-        name = custom_name or get_label(g, onto, "en") or local_name(onto)
+        name = custom_name or get_label(g, onto) or local_name(onto)
         pkg_uri = str(onto)
     else:
-        # Fallback package when no owl:Ontology triple is present
         name = custom_name or "Generated"
         pkg_uri = f"urn:pkg:{name}"
-    pkg_id = ea_id("EAPK", pkg_uri)
+
     return {
         "name": name,
-        "ID": pkg_id,
+        "ID": ea_id("EAPK", pkg_uri),
         "type": "uml:Package",
-        "package": None,  # root has no container, or set to another if desired
-        "tags": []  # you can add {"name":"uri","value": pkg_uri} if you need
+        "package": "",
+        "tags": [],
     }
 
-def build_model(g: Graph, package_name: str | None = None) -> dict:
-    model = {"elements": [], "connectors": []}
 
-    # Root package
+def build_model(g: Graph, package_name: str | None = None) -> dict[str, Any]:
+    """Reconstruit la vue XMI-like à partir du graphe RDF."""
+    model: dict[str, Any] = {"elements": [], "connectors": []}
+
     root_pkg = extract_ontology_package(g, custom_name=package_name)
     model["elements"].append(root_pkg)
     root_pkg_id = root_pkg["ID"]
 
-    # Index classes for quick lookup
-    class_elems: dict[str, dict] = {}
+    class_elems: dict[str, dict[str, Any]] = {}
 
-    # 1) Classes
     for cls in g.subjects(RDF.type, OWL.Class):
         uri = str(cls)
-        name = get_label(g, cls, "en") or local_name(cls)
-        cls_id = ea_id("EAID", uri)
-        tags = [{"name": "uri", "value": uri}]
-        comment = get_comment(g, cls, "en")
-        if comment:
-            tags.append({"name": "definition-en", "value": comment})
-        label = get_label(g, cls, "en")
+        name = get_label(g, cls) or local_name(cls)
+        stored_id = get_literal_value(g, cls, UML_META.eaid) or ea_id("EAID", uri)
+
+        tags = [
+            {"name": "uri", "value": uri},
+            {"name": "referenced", "value": "false"},
+        ]
+        definition = get_comment(g, cls)
+        usage_note = get_scope_note(g, cls)
+        label = get_label(g, cls)
+
+        if definition:
+            tags.append({"name": "definition-en", "value": definition})
         if label:
             tags.append({"name": "label-en", "value": label})
-        # Optional: usage scope tag aligned to many SEMIC models
-        tags.append({"name": "class-usage-scope", "value": "main"})
+        if usage_note:
+            tags.append({"name": "usageNote-en", "value": usage_note})
 
         elem = {
             "name": name,
-            "ID": cls_id,
+            "ID": stored_id,
             "type": "uml:Class",
             "package": root_pkg_id,
             "tags": tags,
-            "attributes": []
+            "attributes": [],
         }
         class_elems[uri] = elem
         model["elements"].append(elem)
 
-    # Helper to ensure a class element exists for non-primitive ranges.
-    # IMPORTANT: never call this for XSD/RDF primitive URIs — check
-    # primitive_from_range first so we never create phantom class elements
-    # for things like xsd:string.
-    def ensure_class(uri_ref: URIRef) -> dict:
+    def ensure_class(uri_ref: URIRef) -> dict[str, Any]:
         u = str(uri_ref)
-        # Safety guard: if somehow a primitive URI reaches here, refuse to
-        # create a class element for it and return a sentinel empty dict.
         if primitive_from_range(uri_ref) is not None:
-            raise ValueError(
-                f"ensure_class called with primitive URI {u!r}. "
-                "Use primitive_from_range instead."
-            )
+            raise ValueError(f"Primitive URI passed to ensure_class: {u}")
+
         if u not in class_elems:
-            name = get_label(g, uri_ref, "en") or local_name(uri_ref)
-            cls_id = ea_id("EAID", u)
+            name = get_label(g, uri_ref) or local_name(uri_ref)
+            stored_id = get_literal_value(g, uri_ref, UML_META.eaid) or ea_id("EAID", u)
             elem = {
                 "name": name,
-                "ID": cls_id,
+                "ID": stored_id,
                 "type": "uml:Class",
                 "package": root_pkg_id,
-                "tags": [{"name": "uri", "value": u}],
-                "attributes": []
+                "tags": [
+                    {"name": "uri", "value": u},
+                    {"name": "referenced", "value": "true"},
+                ],
+                "attributes": [],
             }
             class_elems[u] = elem
             model["elements"].append(elem)
+
         return class_elems[u]
 
-    # 2) Datatype properties -> attributes on their domain class.
-    #    These MUST NOT produce connectors.
     for prop in g.subjects(RDF.type, OWL.DatatypeProperty):
         prop_uri = str(prop)
-        prop_label = get_label(g, prop, "en")
-        prop_comment = get_comment(g, prop, "en")
-        # domains
+        prop_label = get_label(g, prop) or local_name(prop)
+        prop_comment = get_comment(g, prop)
+        prop_usage = get_scope_note(g, prop)
+
         for domain in g.objects(prop, RDFS.domain):
-            domain_uri = str(domain)
-            if domain_uri not in class_elems:
-                ensure_class(domain)
-            domain_elem = class_elems[domain_uri]
-            # range
+            domain_elem = ensure_class(domain)
             ranges = list(g.objects(prop, RDFS.range)) or [RDFS.Literal]
+
             for rng in ranges:
                 primitive = primitive_from_range(rng)
-                if primitive:
-                    attr_type = primitive
-                else:
-                    # Non-primitive custom datatype: surface as the class name
-                    # but still keep it as an attribute (not a connector).
-                    rng_elem = ensure_class(rng)
-                    attr_type = rng_elem["name"]
+                attr_type = primitive if primitive else ensure_class(rng)["name"]
 
-                attr_name = prop_label or local_name(prop)
-                # Use "tags_attribute" to match the XMI JSON convention.
                 attr_tags = [{"name": "uri", "value": prop_uri}]
                 if prop_label:
                     attr_tags.append({"name": "label-en", "value": prop_label})
                 if prop_comment:
                     attr_tags.append({"name": "definition-en", "value": prop_comment})
+                if prop_usage:
+                    attr_tags.append({"name": "usageNote-en", "value": prop_usage})
 
-                domain_elem["attributes"].append({
-                    "name": attr_name,
-                    "type": attr_type,
-                    "lower_bounds": "",
-                    "upper_bounds": "",
-                    "tags_attribute": attr_tags,
-                })
+                domain_elem["attributes"].append(
+                    {
+                        "name": prop_label,
+                        "type": attr_type,
+                        "lower_bounds": "",
+                        "upper_bounds": "",
+                        "tags_attribute": attr_tags,
+                    }
+                )
 
-    # 3) Object properties -> associations
     for prop in g.subjects(RDF.type, OWL.ObjectProperty):
         prop_uri = str(prop)
-        prop_label = get_label(g, prop, "en")
-        prop_comment = get_comment(g, prop, "en")
+        prop_label = get_label(g, prop) or local_name(prop)
+        prop_comment = get_comment(g, prop)
+        prop_usage = get_scope_note(g, prop)
 
         domains = list(g.objects(prop, RDFS.domain))
         ranges = list(g.objects(prop, RDFS.range))
-        # If any side is missing, we cannot create a robust connector
         if not domains or not ranges:
             continue
 
+        relationship = get_literal_value(g, prop, UML_META.relationshipType) or "Association"
+        lb = _safe_xmi_value(get_literal_value(g, prop, UML_META.leftMultiplicity))
+        lt = _safe_xmi_value(get_literal_value(g, prop, UML_META.leftRole))
+        rb = _safe_xmi_value(get_literal_value(g, prop, UML_META.rightMultiplicity))
+        rt = _safe_xmi_value(get_literal_value(g, prop, UML_META.rightRole))
+
         for domain in domains:
-            domain_elem = ensure_class(domain)
+            src = ensure_class(domain)
             for rng in ranges:
-                range_elem = ensure_class(rng)
-                connector = {
-                    "source_name": domain_elem["name"],
-                    "target_name": range_elem["name"],
-                    "relationship": "Association",
-                    "lb": None,             # left multiplicity bound (optional)
-                    "lt": None,             # left role (optional)
-                    "rb": None,             # right multiplicity bound (optional)
-                    "rt": role_name_from_label(prop_label),  # right role name
-                    "tags": [],
-                    "tags_source": [],
-                    "tags_target": []
-                }
-                # Put property metadata under tags_target (as in your example)
+                tgt = ensure_class(rng)
                 tgt_tags = [{"name": "uri", "value": prop_uri}]
                 if prop_comment:
                     tgt_tags.append({"name": "definition-en", "value": prop_comment})
                 if prop_label:
                     tgt_tags.append({"name": "label-en", "value": prop_label})
-                connector["tags_target"] = tgt_tags
-                model["connectors"].append(connector)
+                if prop_usage:
+                    tgt_tags.append({"name": "usageNote-en", "value": prop_usage})
 
-    # 4) rdfs:subClassOf -> generalizations
+                model["connectors"].append(
+                    {
+                        "source_name": src["name"],
+                        "source_id": src["ID"],
+                        "target_name": tgt["name"],
+                        "target_id": tgt["ID"],
+                        "relationship": relationship,
+                        "name": prop_label,
+                        "lb": lb,
+                        "lt": lt,
+                        "rb": rb,
+                        "rt": rt,
+                        "tags": [],
+                        "tags_source": [],
+                        "tags_target": tgt_tags,
+                    }
+                )
+
     for child, parent in g.subject_objects(RDFS.subClassOf):
-        # skip blank-node restrictions here; focus on named superclass
         if isinstance(parent, URIRef):
             child_elem = ensure_class(child)
             parent_elem = ensure_class(parent)
-            gen = {
-                "source_name": child_elem["name"],
-                "target_name": parent_elem["name"],
-                "relationship": "Generalization",
-                "lb": None, "lt": None, "rb": None, "rt": None,
-                "tags": [], "tags_source": [], "tags_target": []
-            }
-            model["connectors"].append(gen)
+            model["connectors"].append(
+                {
+                    "source_name": child_elem["name"],
+                    "source_id": child_elem["ID"],
+                    "target_name": parent_elem["name"],
+                    "target_id": parent_elem["ID"],
+                    "relationship": "Generalization",
+                    "name": "subClassOf",
+                    "lb": "",
+                    "lt": "",
+                    "rb": "",
+                    "rt": "",
+                    "tags": [],
+                    "tags_source": [],
+                    "tags_target": [],
+                }
+            )
 
     return model
 
-def _iri_base(iri: str) -> str:
-    if not iri or "://" not in iri:
-        return None
-    # Split on last slash or hash (support both styles)
-    for sep in ("/", "#"):
-        if sep in iri:
-            head, tail = iri.rsplit(sep, 1)
-            return head if head else None
-    return None
 
-def _label_matches_en(lbl_node: dict[str, Any], expected: str) -> bool:
-    return (
-        isinstance(lbl_node, dict)
-        and lbl_node.get("@language") == "en"
-        and lbl_node.get("@value") == expected
-    )
-
-def _find_xmi_class_iri_by_name(model: dict[str, Any], class_name: str) -> str:
-    xmi = model.get("xmi", {})
-    for el in xmi.get("elements", []):
-        if el.get("type") == "uml:Class" and el.get("name") == class_name:
-            for t in el.get("tags", []):
-                if t.get("name") == "uri":
-                    return t.get("value")
-    return None
-
-def find_class_by_label(g: Graph, class_label: str):
-    for s in g.subjects():
-        label = g.value(s, RDFS.label)
-        type = g.value(s, RDF.type)
-        if label and str(label).lower() == class_label.lower() and str(type) == str(OWL.Class):
-            uri = s
-            return uri
-    return None
-
-def _find_file(
-    user: str,
-    name: str,
-) -> Path:
-    return MODELS_PATH/user/f"{name}.json"
-
-
-def upload_model(
+def _sync_model_from_graph(
+    g: Graph,
     model: dict[str, Any],
-    user: str = "",
-    name: str = "",
+    package_name: str | None = None,
+    source_format: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Save a model in JSON format.
-    """
-    folder_path = MODELS_PATH/user
-    if not exists(folder_path):
-        mkdir(folder_path)
-
-    with open(_find_file(user, name), "w") as f:
-        dump(model, f)
-
-    with open(_find_file(user, name), "r") as f:
-        model = load(f)
-
-    return model
-
-
-def _serialize_graph(g: Graph, model: dict[str, Any]) -> dict[str, Any]:
-    """
-    Serialize an RDF graph back into both the 'ttl' (JSON-LD) and 'ttl_raw' (Turtle)
-    fields of a model dict, and rebuild the 'xmi' field.
-
-    This is a shared helper used by add_class, add_attribute, and add_connector
-    to avoid duplicating serialization logic.
-    """
-    json_ld_str: str = g.serialize(format="json-ld", indent=4)
-    model["ttl"] = json.loads(json_ld_str) if json_ld_str else {}
-
+    """Resynchronise ttl, ttl_raw, xmi, elements et connectors à partir du graphe RDF."""
+    json_ld_str = g.serialize(format="json-ld", indent=4)
     ttl_raw = g.serialize(format="turtle")
-    model["ttl_raw"] = (
-        ttl_raw.decode("utf-8") if isinstance(ttl_raw, (bytes, bytearray)) else str(ttl_raw)
-    )
+    xmi = build_model(g, package_name=package_name)
 
-    model["xmi"] = build_model(g)
+    model["ttl"] = json.loads(json_ld_str) if json_ld_str else {}
+    model["ttl_raw"] = ttl_raw.decode("utf-8") if isinstance(ttl_raw, (bytes, bytearray)) else str(ttl_raw)
+
+    model["xmi"] = xmi
+    model["elements"] = xmi.get("elements", [])
+    model["connectors"] = xmi.get("connectors", [])
+    model["source_format"] = (source_format or model.get("source_format") or "ttl").lower()
+
     return model
 
 
-def _save_and_reload(fp: Path, model: dict[str, Any]) -> dict[str, Any]:
-    """Write model to disk and return the freshly loaded copy."""
-    with open(fp, "w") as f:
-        dump(model, f)
-    with open(fp, "r") as f:
-        return load(f)
+def _save_model(fp: Path, model: dict[str, Any]) -> dict[str, Any]:
+    """Écrit le modèle sur disque puis le relit."""
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump(model, f, ensure_ascii=False, indent=2)
+
+    with open(fp, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_model(fp: Path) -> dict[str, Any]:
+    """Charge un fichier modèle JSON ; renvoie {} s'il est absent, vide ou invalide."""
+    if not fp.exists():
+        return {}
+
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            raw = f.read().strip()
+            if not raw:
+                return {}
+            return json.loads(raw)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def ensure_model_exists(user: str = "", name: str = "") -> Path:
+    """Garantit qu'un fichier modèle existe pour un utilisateur et un nom de modèle."""
+    fp = _find_file(user, name)
+    if fp.exists():
+        return fp
+
+    g = _new_graph(user, name or "Generated")
+    model: dict[str, Any] = {
+        "elements": [],
+        "connectors": [],
+        "xmi": {"elements": [], "connectors": []},
+        "ttl": {},
+        "ttl_raw": "",
+        "source_format": "ttl",
+    }
+    model = _sync_model_from_graph(g, model, package_name=name or "Generated", source_format="ttl")
+    _save_model(fp, model)
+    return fp
+
+
+def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[str, Any]:
+    """
+    Remplace ou fusionne un modèle JSON existant.
+
+    Le champ `source_format` permet de préserver le format d'origine :
+    - 'ttl' pour un modèle RDF/Turtle ;
+    - 'xmi' pour un modèle UML/XMI.
+    """
+    fp = ensure_model_exists(user=user, name=name)
+    current = _load_model(fp)
+
+    if not isinstance(model, dict):
+        raise ValueError("model must be a dict")
+
+    current.update(model)
+
+    current.setdefault("elements", [])
+    current.setdefault("connectors", [])
+    current.setdefault("xmi", {"elements": current["elements"], "connectors": current["connectors"]})
+    current.setdefault("ttl", {})
+    current.setdefault("ttl_raw", "")
+    current["source_format"] = _default_source_format(current)
+
+    if current.get("ttl_raw"):
+        g = Graph()
+        g.parse(data=current["ttl_raw"], format="turtle")
+        current = _sync_model_from_graph(
+            g,
+            current,
+            package_name=name or "Generated",
+            source_format=current["source_format"],
+        )
+    else:
+        current["xmi"] = {
+            "elements": current.get("elements", []),
+            "connectors": current.get("connectors", []),
+        }
+        current["elements"] = current["xmi"].get("elements", [])
+        current["connectors"] = current["xmi"].get("connectors", [])
+
+    return _save_model(fp, current)
+
+
+def load_full_model(user: str = "", name: str = "") -> dict[str, Any]:
+    """Charge le modèle complet persistant."""
+    fp = ensure_model_exists(user=user, name=name)
+    return _load_model(fp)
+
+
+def get_model(user: str = "", name: str = "") -> dict[str, Any]:
+    """Alias de lecture du modèle courant."""
+    fp = ensure_model_exists(user=user, name=name)
+    return _load_model(fp)
+
+
+def _iter_referenceable_class_uris(g: Graph):
+    """
+    Retourne les URI de classes utilisables dans les liens :
+    - classes explicites owl:Class
+    - classes référencées dans rdfs:domain / rdfs:range
+    - classes impliquées dans rdfs:subClassOf
+    Sans modifier leur statut RDF.
+    """
+    seen: set[str] = set()
+
+    def _yield_if_uri(node):
+        if isinstance(node, URIRef):
+            s = str(node)
+            if s not in seen and primitive_from_range(node) is None:
+                seen.add(s)
+                yield node
+
+    for cls in g.subjects(RDF.type, OWL.Class):
+        yield from _yield_if_uri(cls)
+
+    for _, _, domain in g.triples((None, RDFS.domain, None)):
+        yield from _yield_if_uri(domain)
+
+    for _, _, rng in g.triples((None, RDFS.range, None)):
+        yield from _yield_if_uri(rng)
+
+    for child, parent in g.subject_objects(RDFS.subClassOf):
+        yield from _yield_if_uri(child)
+        yield from _yield_if_uri(parent)
+
+
+def _is_referenceable_class_uri(g: Graph, uri: URIRef) -> bool:
+    """
+    Indique si une URI peut être utilisée comme classe cible/source
+    même si elle n'est pas explicitement déclarée owl:Class.
+    """
+    if primitive_from_range(uri) is not None:
+        return False
+
+    if (uri, RDF.type, OWL.Class) in g:
+        return True
+
+    if (None, RDFS.domain, uri) in g:
+        return True
+
+    if (None, RDFS.range, uri) in g:
+        return True
+
+    if (uri, RDFS.subClassOf, None) in g:
+        return True
+
+    if (None, RDFS.subClassOf, uri) in g:
+        return True
+
+    return False
+
+
+def find_class_by_label(g: Graph, class_name: str) -> URIRef | None:
+    """
+    Recherche une classe par label, nom local ou URI.
+
+    Important :
+    - retrouve les classes explicites owl:Class ;
+    - retrouve aussi les classes simplement référencées dans le graphe
+      (domain/range/subClassOf) ;
+    - ne crée rien et ne modifie pas leur statut RDF.
+    """
+    wanted = _canonical_text(class_name)
+    if not wanted:
+        return None
+
+    if "://" in class_name or class_name.startswith("urn:"):
+        uri = URIRef(class_name)
+        if _is_referenceable_class_uri(g, uri):
+            return uri
+
+    for s in _iter_referenceable_class_uris(g):
+        if _canonical_text(local_name(s)) == wanted:
+            return s
+
+        label = get_label(g, s)
+        if label and _canonical_text(label) == wanted:
+            return s
+
+        for raw_label in g.objects(s, RDFS.label):
+            if _canonical_text(str(raw_label)) == wanted:
+                return s
+
+    return None
+
+
+def find_class_by_label_or_xmi(g: Graph, class_name: str, package_name: str | None = None) -> URIRef | None:
+    """
+    Recherche une classe :
+    1) dans le graphe RDF (classes explicites + classes référencées),
+    2) sinon dans la vue XMI reconstruite, utile pour les classes externes
+       matérialisées par ensure_class().
+    """
+    found = find_class_by_label(g, class_name)
+    if found:
+        return found
+
+    wanted = _canonical_text(class_name)
+    if not wanted:
+        return None
+
+    xmi = build_model(g, package_name=package_name)
+    for el in xmi.get("elements", []):
+        if el.get("type") != "uml:Class":
+            continue
+        if _canonical_text(el.get("name")) != wanted:
+            continue
+
+        for tag in el.get("tags", []):
+            if tag.get("name") == "uri" and tag.get("value"):
+                return URIRef(tag["value"])
+
+    return None
+
+
+def _find_class_result(model: dict[str, Any], title: str | None = None, element_id: str | None = None) -> dict[str, Any]:
+    """Retrouve une classe dans la vue xmi après écriture."""
+    for el in model.get("xmi", {}).get("elements", []):
+        if el.get("type") != "uml:Class":
+            continue
+        if element_id and el.get("ID") == element_id:
+            return el
+        if title and _canonical_text(el.get("name")) == _canonical_text(title):
+            return el
+    return {}
+
+
+def _find_attribute_result(model: dict[str, Any], class_name: str, attr_uri: str) -> dict[str, Any]:
+    """Retrouve un attribut dans la vue xmi après écriture."""
+    for el in model.get("xmi", {}).get("elements", []):
+        if el.get("type") == "uml:Class" and _canonical_text(el.get("name")) == _canonical_text(class_name):
+            for attr in el.get("attributes", []):
+                for tag in attr.get("tags_attribute", []):
+                    if tag.get("name") == "uri" and tag.get("value") == attr_uri:
+                        return attr
+    return {}
+
+
+def _find_connector_result(model: dict[str, Any], rel_uri: str) -> dict[str, Any]:
+    """Retrouve un connecteur dans la vue xmi après écriture."""
+    for conn in model.get("xmi", {}).get("connectors", []):
+        for tag in conn.get("tags_target", []):
+            if tag.get("name") == "uri" and tag.get("value") == rel_uri:
+                return conn
+    return {}
 
 
 def add_class(
@@ -465,80 +732,54 @@ def add_class(
     usage_note: str,
     user: str = "",
     name: str = "",
-    package: str = "",
-    ID: str = "",
+    package: str | None = None,
+    ID: str | None = None,
 ) -> dict[str, Any]:
-    """
-    Creates a dictionary representing a UML class with associated metadata,
-    and adds it to the `user`'s model `name`.
+    """Ajoute une classe au modèle."""
+    package = package or ""
+    ID = ID or ""
 
-    :param package_id: The ID of the package to which the class belongs.
-    :param title: The name of the class.
-    :param definition: A textual definition or description of the class.
-    :param usage_note: Additional usage notes for the class.
-    :return: A dictionary with the following keys:
-        - "name": The name of the class (title).
-        - "ID": A unique identifier for the class.
-        - "type": The UML element type, set to "uml:Class".
-        - "package": The ID of the package to which the class belongs.
-        - "tags": A list of dictionaries containing metadata tags:
-            - "definition": A tag for the class's definition.
-            - "label": A tag for the class's label or title.
-            - "usage_note": A tag for the class's usage notes.
-    """
-    fp = _find_file(user, name)
-    if not exists(fp):
-        return {}
+    fp = ensure_model_exists(user=user, name=name)
+    model = _load_model(fp)
 
-    with open(fp, "r") as f:
-        model: dict[str, Any] = load(f)
-
-    # --- OWL/TTL mode ---
-    if "ttl_raw" in model:
-        g = Graph()
+    g = Graph()
+    if model.get("ttl_raw"):
         g.parse(data=model["ttl_raw"], format="turtle")
+    else:
+        g = _new_graph(user, name or "Generated")
 
-        # Prevent duplicates by label
-        if find_class_by_label(g, title):
-            return {"error": "Class already exists"}
+    existing = find_class_by_label(g, title)
+    if existing:
+        model = _sync_model_from_graph(
+            g,
+            model,
+            package_name=name or "Generated",
+            source_format=_default_source_format(model),
+        )
+        _save_model(fp, model)
+        return _find_class_result(model, title=title, element_id=ID or None) or {
+            "error": f"La classe '{title}' existe déjà."
+        }
 
-        new_class_uri = URIRef(ID)
-        g.add((new_class_uri, RDF.type, OWL.Class))
-        g.add((new_class_uri, RDFS.label, Literal(title, lang="en")))
-        g.add((new_class_uri, RDFS.comment, Literal(definition, lang="en")))
-        g.add((new_class_uri, SKOS.scopeNote, Literal(usage_note, lang="en")))
+    class_uri = _coerce_class_uri(ID, title)
+    g.add((class_uri, RDF.type, OWL.Class))
+    _set_literal(g, class_uri, RDFS.label, title, lang="fr")
+    _set_literal(g, class_uri, RDFS.comment, definition, lang="fr")
+    _set_literal(g, class_uri, SKOS.scopeNote, usage_note, lang="fr")
+    if ID:
+        _set_literal(g, class_uri, UML_META.eaid, ID)
 
-        model = _serialize_graph(g, model)
-        model = _save_and_reload(fp, model)
+    model = _sync_model_from_graph(
+        g,
+        model,
+        package_name=name or "Generated",
+        source_format=_default_source_format(model),
+    )
+    model = _save_model(fp, model)
 
-        # Return the XMI element that corresponds to the newly added class so the
-        # caller gets a predictable, structured object rather than a random JSON-LD node.
-        for el in model.get("xmi", {}).get("elements", []):
-            if el.get("type") == "uml:Class" and el.get("name") == title:
-                return el
-        return {}
-
-    # --- XMI JSON mode ---
-    element: dict[str, Any] = {
-        "name": title,
-        "ID": ID,
-        "type": "uml:Class",
-        "package": package,
-        "tags": [
-            {"name": "label", "value": title},
-            {"name": "definition", "value": definition},
-            {"name": "usage_note", "value": usage_note},
-        ],
-        # Ensure the attributes list is always present so add_attribute works
-        # without having to handle its absence separately.
-        "attributes": [],
+    return _find_class_result(model, title=title, element_id=ID or None) or {
+        "error": f"Classe '{title}' créée mais introuvable dans le résultat."
     }
-
-    model.setdefault("elements", []).append(element)
-    model = _save_and_reload(fp, model)
-
-    elements: list[dict[str, Any]] = model.get("elements", [])
-    return elements[-1] if elements else {}
 
 
 def add_attribute(
@@ -547,139 +788,55 @@ def add_attribute(
     attr_definition: str,
     attr_uri: str,
     attr_usage_note: str = "",
-    attr_type: str = "",
+    attr_type: str | None = "",
     user: str = "",
     name: str = "",
 ) -> dict[str, Any]:
-    """
-    Adds an attribute to an existing UML class in the model file belonging to `user` and model `name`.
+    """Ajoute un attribut à une classe existante."""
+    fp = ensure_model_exists(user=user, name=name)
+    model = _load_model(fp)
 
-    JSON shape produced:
-      {
-        "name": "<attr_label>",
-        "type": "<attr_type>",
-        "lower_bounds": "",
-        "upper_bounds": "",
-        "tags_attribute": [
-          { "name": "uri",          "value": "<attr_uri>" },
-          { "name": "label-en",     "value": "<attr_label>" },
-          { "name": "definition-en","value": "<attr_definition>" },
-          { "name": "usageNote-en", "value": "<attr_usage_note>" }
-        ]
-      }
-
-    Preconditions:
-      - The model file path is resolved via `_find_file(user, name)` and must exist.
-      - A UML class element with `type == "uml:Class"` and `name == class_name` must exist.
-
-    Parameters:
-      :param class_name: The exact UML class name to which the attribute will be added.
-      :param attr_label: The attribute label.
-      :param attr_definition: Human-readable definition for the attribute.
-      :param attr_uri: URI identifying the attribute property.
-      :param attr_usage_note: Optional usage note; defaults to empty string.
-      :param attr_type: Optional type name or XSD/class URI for the attribute.
-      :param user: Logical user/tenant identifier.
-      :param name: Logical model name (file identifier).
-
-    Returns:
-      - The stored attribute dictionary, or an error dict.
-    """
-    fp = _find_file(user, name)
-    if not exists(fp):
-        return {"error": "Model file not found"}
-
-    with open(fp, "r") as f:
-        model: dict[str, Any] = load(f)
-
-    # --- OWL/TTL mode ---
-    if "ttl_raw" in model:
-        g = Graph()
+    g = Graph()
+    if model.get("ttl_raw"):
         g.parse(data=model["ttl_raw"], format="turtle")
+    else:
+        g = _new_graph(user, name or "Generated")
 
-        class_uri = find_class_by_label(g, class_name)
-        if not class_uri:
-            return {"error": "Class does not exist"}
+    class_uri = find_class_by_label(g, class_name)
+    if not class_uri:
+        return {"error": f"Classe source introuvable : '{class_name}'"}
 
-        prop_uri = URIRef(attr_uri)
-        g.add((prop_uri, RDFS.label, Literal(attr_label, lang="en")))
-        g.add((prop_uri, RDFS.comment, Literal(attr_definition, lang="en")))
-        g.add((prop_uri, SKOS.scopeNote, Literal(attr_usage_note, lang="en")))
-        g.add((prop_uri, RDFS.domain, class_uri))
+    prop_uri = URIRef(attr_uri)
+    _set_literal(g, prop_uri, RDFS.label, attr_label, lang="fr")
+    _set_literal(g, prop_uri, RDFS.comment, attr_definition, lang="fr")
+    _set_literal(g, prop_uri, SKOS.scopeNote, attr_usage_note, lang="fr")
+    _set_uri(g, prop_uri, RDFS.domain, class_uri)
 
-        # Resolve the caller-supplied type (friendly name, short prefix, or full URI)
-        # to a canonical URI and learn whether it is a primitive/datatype.
-        # This is the critical step: using primitive_from_range(URIRef(attr_type))
-        # directly would ALWAYS return None for friendly names like "Text", "String",
-        # "GenericDate", or short forms like "xsd:string", causing every attribute to
-        # be mis-declared as an ObjectProperty and generate a phantom class + connector.
-        canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+    canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
 
-        if is_primitive:
-            g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
-            if canonical_range_uri:
-                g.add((prop_uri, RDFS.range, URIRef(canonical_range_uri)))
-        else:
-            # Genuine object property: range is a named class URI.
-            g.add((prop_uri, RDF.type, OWL.ObjectProperty))
-            if canonical_range_uri:
-                g.add((prop_uri, RDFS.range, URIRef(canonical_range_uri)))
+    g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
+    g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
 
-        model = _serialize_graph(g, model)
-        model = _save_and_reload(fp, model)
+    if is_primitive:
+        g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
+        if canonical_range_uri:
+            _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
+    else:
+        g.add((prop_uri, RDF.type, OWL.ObjectProperty))
+        if canonical_range_uri:
+            _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
 
-        # Return the matching attribute from the rebuilt XMI.
-        # Use "tags_attribute" (not "tags") to match build_model's output convention.
-        for el in model.get("xmi", {}).get("elements", []):
-            if el.get("type") == "uml:Class" and el.get("name") == class_name:
-                attrs = el.get("attributes", [])
-                for attr in attrs:
-                    for tag in attr.get("tags_attribute", []):
-                        if tag.get("name") == "uri" and tag.get("value") == attr_uri:
-                            return attr
-                return attrs[-1] if attrs else {}
-        return {}
-
-    # --- XMI mode ---
-    elements: list[dict[str, Any]] = model.get("elements", [])
-    target_class: dict[str, Any] = next(
-        (el for el in elements if el.get("type") == "uml:Class" and el.get("name") == class_name),
-        None,
+    model = _sync_model_from_graph(
+        g,
+        model,
+        package_name=name or "Generated",
+        source_format=_default_source_format(model),
     )
-    if not target_class:
-        return {"error": "Class not found"}
+    model = _save_model(fp, model)
 
-    # FIX: guarantee the attributes list exists before appending.
-    if not isinstance(target_class.get("attributes"), list):
-        target_class["attributes"] = []
-
-    attribute: dict[str, Any] = {
-        "name": attr_label,
-        "type": attr_type,
-        "lower_bounds": "",
-        "upper_bounds": "",
-        "tags_attribute": [
-            {"name": "uri",           "value": attr_uri},
-            {"name": "label-en",      "value": attr_label},
-            {"name": "definition-en", "value": attr_definition},
-            {"name": "usageNote-en",  "value": attr_usage_note},
-        ],
+    return _find_attribute_result(model, class_name=class_name, attr_uri=attr_uri) or {
+        "error": f"Attribut '{attr_label}' créé mais introuvable dans le résultat."
     }
-    target_class["attributes"].append(attribute)
-
-    # FIX: persist the mutated model (which already holds the updated target_class
-    # in-memory) and reload to return the stored copy.
-    model = _save_and_reload(fp, model)
-
-    elements = model.get("elements", [])
-    target_class = next(
-        (el for el in elements if el.get("type") == "uml:Class" and el.get("name") == class_name),
-        None,
-    )
-    if not target_class:
-        return {}
-    attrs = target_class.get("attributes", [])
-    return attrs[-1] if attrs else {}
 
 
 def add_connector(
@@ -688,135 +845,201 @@ def add_connector(
     rel_label: str,
     rel_definition: str,
     rel_uri: str,
-    relationship: str,  # e.g., "Association", "Aggregation", "Composition", "Generalization", "Realization"
-    rb: str = None,
-    rt: str = None,
+    relationship: str,
+    lb: str = "",
+    rb: str = "",
+    lt: str = "",
+    rt: str = "",
     rel_usage_note: str = "",
     user: str = "",
     name: str = "",
 ) -> dict[str, Any]:
     """
-    Adds a connector between two existing elements identified by their names and annotates
-    the target end with semantic tags (URI, label, definition, usage note).
+    Ajoute une relation entre deux classes existantes du modèle.
 
-    JSON shape produced:
-      {
-        "source_name": "<source_name>",
-        "target_name": "<target_name>",
-        "relationship": "<Association|Generalization|...>",
-        "lb": null,
-        "lt": null,
-        "rb": "<rb or null>",
-        "rt": "<rt or null>",
-        "tags": [],
-        "tags_source": [],
-        "tags_target": [
-          { "name": "uri",          "value": "<rel_uri>" },
-          { "name": "label-en",     "value": "<rel_label>" },
-          { "name": "definition-en","value": "<rel_definition>" },
-          { "name": "usageNote-en", "value": "<rel_usage_note>" }
-        ]
-      }
+    Ordre attendu des champs à remplir :
+    1. source_name : nom de la classe source
+    2. target_name : nom de la classe cible
+    3. rel_label : nom lisible de la relation
+    4. rel_definition : définition textuelle de la relation
+    5. rel_uri : URI unique de la relation
+    6. relationship : type UML ('Association', 'Composition', 'Aggregation', 'Generalization')
+    7. lb : cardinalité côté source
+    8. rb : cardinalité côté cible
+    9. lt : rôle côté source
+    10. rt : rôle côté cible
+    11. rel_usage_note : note d'usage optionnelle
+    12. user : utilisateur
+    13. name : nom du modèle
 
-    Parameters:
-      :param source_name: Name of the source element (must exist in `elements`).
-      :param target_name: Name of the target element (must exist in `elements`).
-      :param rel_label: Human-readable role/relationship label.
-      :param rel_definition: Definition for the relationship end.
-      :param rel_uri: URI identifying the relationship / object property.
-      :param relationship: UML relationship type (e.g., "Association", "Generalization").
-      :param rb: Optional right-end multiplicity (e.g., "0..*", "1").
-      :param rt: Optional right-end role name (e.g., "+domicile").
-      :param rel_usage_note: Optional usage note for the relationship end.
-      :param user: Logical user identifier.
-      :param name: Logical model name (file identifier).
-
-    Returns:
-      - The stored connector dictionary, or an error dict.
+    Règles strictes :
+    - Toujours remplir lb et rb si l'utilisateur donne les cardinalités des deux côtés.
+    - lb et rb sont des cardinalités uniquement : '1', '0..1', '*', '1..*'.
+    - lt et rt sont des rôles uniquement : jamais des cardinalités.
+    - Si aucun rôle n'est demandé, mettre lt='' et rt=''.
     """
-    fp = _find_file(user, name)
-    if not exists(fp):
-        return {"error": "Model file not found"}
+    fp = ensure_model_exists(user=user, name=name)
+    model = _load_model(fp)
 
-    with open(fp, "r") as f:
-        model: dict[str, Any] = load(f)
-
-    # --- OWL/TTL mode ---
-    if "ttl_raw" in model:
-        g = Graph()
+    g = Graph()
+    if model.get("ttl_raw"):
         g.parse(data=model["ttl_raw"], format="turtle")
+    else:
+        g = _new_graph(user, name or "Generated")
 
-        source_uri = find_class_by_label(g, source_name)
-        if not source_uri:
-            return {"error": f"Source class '{source_name}' does not exist"}
+    source_uri = find_class_by_label_or_xmi(g, source_name, package_name=name or "Generated")
+    if not source_uri:
+        return {"error": f"Classe source introuvable : '{source_name}'"}
 
-        # FIX: also resolve the target class so we can set rdfs:range correctly.
-        target_uri = find_class_by_label(g, target_name)
-        if not target_uri:
-            return {"error": f"Target class '{target_name}' does not exist"}
+    target_uri = find_class_by_label_or_xmi(g, target_name, package_name=name or "Generated")
+    if not target_uri:
+        return {"error": f"Classe cible introuvable : '{target_name}'"}
 
-        prop_uri = URIRef(rel_uri)
-        g.add((prop_uri, RDF.type, OWL.ObjectProperty))
-        g.add((prop_uri, RDFS.label, Literal(rel_label, lang="en")))
-        g.add((prop_uri, RDFS.comment, Literal(rel_definition, lang="en")))
-        g.add((prop_uri, SKOS.scopeNote, Literal(rel_usage_note, lang="en")))
-        g.add((prop_uri, RDFS.domain, source_uri))
-        # FIX: set the range to the target class URI (was entirely missing before).
-        g.add((prop_uri, RDFS.range, target_uri))
+    prop_uri = URIRef(rel_uri)
+    relationship = _norm_text(relationship) or "Association"
+    lb = _safe_xmi_value(lb)
+    rb = _safe_xmi_value(rb)
+    lt = _safe_xmi_value(lt)
+    rt = _safe_xmi_value(rt)
 
-        model = _serialize_graph(g, model)
-        model = _save_and_reload(fp, model)
+    g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
+    g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
+    g.add((prop_uri, RDF.type, OWL.ObjectProperty))
 
-        # Return the matching connector from the rebuilt XMI.
-        for conn in model.get("xmi", {}).get("connectors", []):
-            for tag in conn.get("tags_target", []):
-                if tag.get("name") == "uri" and tag.get("value") == rel_uri:
-                    return conn
-        # Fallback: return last connector.
-        connectors = model.get("xmi", {}).get("connectors", [])
-        return connectors[-1] if connectors else {}
+    _set_literal(g, prop_uri, RDFS.label, rel_label, lang="fr")
+    _set_literal(g, prop_uri, RDFS.comment, rel_definition, lang="fr")
+    _set_literal(g, prop_uri, SKOS.scopeNote, rel_usage_note, lang="fr")
+    _set_uri(g, prop_uri, RDFS.domain, source_uri)
+    _set_uri(g, prop_uri, RDFS.range, target_uri)
 
-    # --- XMI mode ---
-    elements: list[dict[str, Any]] = model.get("elements", [])
+    _set_literal(g, prop_uri, UML_META.relationshipType, relationship)
+    _set_literal(g, prop_uri, UML_META.leftMultiplicity, lb)
+    _set_literal(g, prop_uri, UML_META.rightMultiplicity, rb)
+    _set_literal(g, prop_uri, UML_META.leftRole, lt)
+    _set_literal(g, prop_uri, UML_META.rightRole, rt)
 
-    # FIX: restrict the existence check to actual classes/elements, not packages,
-    # to avoid false positives when a package shares a name with a class.
-    src_exists = any(
-        el.get("name") == source_name and el.get("type") != "uml:Package"
-        for el in elements
+    model = _sync_model_from_graph(
+        g,
+        model,
+        package_name=name or "Generated",
+        source_format=_default_source_format(model),
     )
-    tgt_exists = any(
-        el.get("name") == target_name and el.get("type") != "uml:Package"
-        for el in elements
-    )
-    if not src_exists:
-        return {"error": f"Source element '{source_name}' not found"}
-    if not tgt_exists:
-        return {"error": f"Target element '{target_name}' not found"}
+    model = _save_model(fp, model)
 
-    connector: dict[str, Any] = {
-        "source_name": source_name,
-        "target_name": target_name,
-        "relationship": relationship,
-        "lb": None,
-        "lt": None,
-        "rb": rb,
-        "rt": rt,
-        "tags": [],
-        "tags_source": [],
-        "tags_target": [
-            {"name": "uri",           "value": rel_uri},
-            {"name": "label-en",      "value": rel_label},
-            {"name": "definition-en", "value": rel_definition},
-            {"name": "usageNote-en",  "value": rel_usage_note},
-        ],
+    return _find_connector_result(model, rel_uri=rel_uri) or {
+        "error": f"Connecteur '{rel_label}' créé mais introuvable dans le résultat."
     }
 
-    # FIX: use setdefault so the key is always present whether or not the
-    # original model file was created with it.
-    model.setdefault("connectors", []).append(connector)
 
-    model = _save_and_reload(fp, model)
+def _remove_none_deep(value: Any) -> Any:
+    """Supprime récursivement les valeurs None d'une structure JSON."""
+    if isinstance(value, dict):
+        return {k: _remove_none_deep(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_remove_none_deep(v) for v in value if v is not None]
+    return value
 
-    connectors: list[dict[str, Any]] = model.get("connectors", [])
-    return connectors[-1] if connectors else {}
+
+def build_xmi_bytes(model: dict[str, Any]) -> bytes:
+    """
+    Génère un XML simple de type XMI-like à partir de model['xmi'].
+
+    Toute valeur None est supprimée ou convertie avant sérialisation pour éviter
+    l'erreur 'cannot serialize None (type NoneType)'.
+    """
+    xmi = _remove_none_deep(model.get("xmi", {}))
+    root = Element("xmi:XMI", {"xmlns:xmi": "http://www.omg.org/XMI"})
+
+    package_el = SubElement(root, "uml:Model", {"xmlns:uml": "http://www.omg.org/spec/UML/20131001"})
+    package_el.set("name", _safe_xmi_value(model.get("name") or "model"))
+
+    elements = xmi.get("elements", [])
+    connectors = xmi.get("connectors", [])
+
+    for el in elements:
+        attrs = {
+            "id": _safe_xmi_value(el.get("ID")),
+            "name": _safe_xmi_value(el.get("name")),
+            "type": _safe_xmi_value(el.get("type")),
+            "package": _safe_xmi_value(el.get("package")),
+        }
+        class_el = SubElement(package_el, "packagedElement", attrs)
+
+        for tag in el.get("tags", []):
+            tag_el = SubElement(class_el, "tag")
+            tag_el.set("name", _safe_xmi_value(tag.get("name")))
+            tag_el.set("value", _safe_xmi_value(tag.get("value")))
+
+        for attr in el.get("attributes", []):
+            attr_el = SubElement(class_el, "ownedAttribute")
+            attr_el.set("name", _safe_xmi_value(attr.get("name")))
+            attr_el.set("type", _safe_xmi_value(attr.get("type")))
+            attr_el.set("lower", _safe_xmi_value(attr.get("lower_bounds")))
+            attr_el.set("upper", _safe_xmi_value(attr.get("upper_bounds")))
+
+            for tag in attr.get("tags_attribute", []):
+                tag_el = SubElement(attr_el, "tag")
+                tag_el.set("name", _safe_xmi_value(tag.get("name")))
+                tag_el.set("value", _safe_xmi_value(tag.get("value")))
+
+    for conn in connectors:
+        conn_el = SubElement(package_el, "connector")
+        conn_el.set("name", _safe_xmi_value(conn.get("name")))
+        conn_el.set("relationship", _safe_xmi_value(conn.get("relationship")))
+        conn_el.set("source_id", _safe_xmi_value(conn.get("source_id")))
+        conn_el.set("target_id", _safe_xmi_value(conn.get("target_id")))
+        conn_el.set("lb", _safe_xmi_value(conn.get("lb")))
+        conn_el.set("rb", _safe_xmi_value(conn.get("rb")))
+        conn_el.set("lt", _safe_xmi_value(conn.get("lt")))
+        conn_el.set("rt", _safe_xmi_value(conn.get("rt")))
+
+        for tag in conn.get("tags_target", []):
+            tag_el = SubElement(conn_el, "tag")
+            tag_el.set("name", _safe_xmi_value(tag.get("name")))
+            tag_el.set("value", _safe_xmi_value(tag.get("value")))
+
+    return tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def get_export_info(user: str = "", name: str = "") -> dict[str, str]:
+    """
+    Retourne les métadonnées d'export à utiliser dans l'UI.
+
+    Résultat :
+    - source_format : ttl ou xmi
+    - file_name
+    - mime_type
+    """
+    model = get_model(user=user, name=name)
+    source_format = _default_source_format(model)
+    model_name = _sanitize_path_component(name, "model")
+
+    if source_format == "xmi":
+        return {
+            "source_format": "xmi",
+            "file_name": f"{model_name}.xmi",
+            "mime_type": "application/xml",
+        }
+
+    return {
+        "source_format": "ttl",
+        "file_name": f"{model_name}.ttl",
+        "mime_type": "text/turtle",
+    }
+
+
+def export_model_bytes(user: str = "", name: str = "") -> bytes:
+    """
+    Exporte le modèle dans son format d'origine.
+
+    - Si le modèle vient d'un TTL : export .ttl
+    - Si le modèle vient d'un XMI : export .xmi
+    """
+    model = get_model(user=user, name=name)
+    source_format = _default_source_format(model)
+
+    if source_format == "xmi":
+        return build_xmi_bytes(model)
+
+    ttl_text = model.get("ttl_raw", "") or ""
+    return ttl_text.encode("utf-8")
