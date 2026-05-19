@@ -259,7 +259,7 @@ _FRIENDLY_TO_XSD_URI: dict[str, str] = {
 def resolve_type_uri(attr_type: str | None) -> tuple[str, bool]:
     attr_type = _norm_text(attr_type)
     if not attr_type:
-        return ("", False)
+        return (_FRIENDLY_TO_XSD_URI.get(str(XSD.string)), True)
 
     if "://" in attr_type or attr_type.startswith("urn:"):
         prim = primitive_from_range(URIRef(attr_type))
@@ -269,7 +269,7 @@ def resolve_type_uri(attr_type: str | None) -> tuple[str, bool]:
     if canonical:
         return (canonical, True)
 
-    return (attr_type, False)
+    return (_FRIENDLY_TO_XSD_URI.get(str(XSD.string)), True)
 
 
 def _default_source_format(model: dict[str, Any]) -> str:
@@ -1272,19 +1272,14 @@ def add_attribute(
     _set_literal(g, prop_uri, SKOS.scopeNote, attr_usage_note, lang="fr")
     _add_uri(g, prop_uri, RDFS.domain, class_uri)
 
-    canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+    canonical_range_uri, _ = resolve_type_uri(attr_type)
 
     g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
     g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
+    g.remove((prop_uri, RDFS.range, None))
 
-    if is_primitive:
-        g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
-        if canonical_range_uri:
-            _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
-    else:
-        g.add((prop_uri, RDF.type, OWL.ObjectProperty))
-        if canonical_range_uri:
-            _add_uri(g, prop_uri, RDFS.range, canonical_range_uri)
+    g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
+    _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
 
     model = _sync_model_from_graph(
         g,
@@ -1296,6 +1291,12 @@ def add_attribute(
 
     return _find_attribute_result(model, class_name=class_name, attr_uri=attr_uri) or {
         "error": f"Attribut '{attr_label}' créé mais introuvable dans le résultat."
+    }
+    return _find_attribute_result(model, classname=class_name, attruri=attr_uri) or {
+        "warning": (
+            f"Attribut '{attr_label}' créé en owl:DatatypeProperty "
+            f"avec type '{canonical_range_uri}', mais introuvable dans le résultat reconstruit."
+        )
     }
 
 
