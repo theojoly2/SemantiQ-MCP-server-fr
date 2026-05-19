@@ -2,6 +2,9 @@ from __future__ import annotations
 from resources.semantic_model.utils import get_model
 from tools.index_search import retrieve_documents
 from fastmcp import Context
+import re
+import json
+
 
 # --- JSON-LD helpers ---
 def _get_ld_label(item):
@@ -14,18 +17,21 @@ def _get_ld_label(item):
         return labels[0].get("@value")
     return None
 
+
 async def reuse_check(
     user: str,
     name: str,
-    ctx: Context = None,
-    vocabularies: list = None,
+    ctx: Context | None = None,
+    vocabularies: list[str] | None = None,
     n_documents: int = 5,
-    target_names: list = None,
+    target_names: list[str] | None = None,
 ) -> dict:
     """Tool for assessing semantic interoperability of a data model by checking reuse of standard concepts."""
-    import json
     model = get_model(user, name)
     results = {}
+
+    vocabularies = vocabularies or []
+    target_names = target_names or []
 
     # Concrete guidance from the style guide
     reuse_guidance = (
@@ -48,7 +54,7 @@ async def reuse_check(
             class_names = {element.get("name") for element in model.get("elements", []) if element.get("type") == "uml:Class"}
 
         for i, element in enumerate(model.get("elements", [])):
-            
+
             await ctx.report_progress(progress=i, total=len(model.get("elements", [])))
 
             if i % 30 == 0 and i > 0:
@@ -81,7 +87,6 @@ async def reuse_check(
                     temperature=0.0,
                     max_tokens=800,
                 )
-                import json, re
                 m = re.search(r"\{.*\}", getattr(response, "text", str(response)), re.S)
                 try:
                     results[class_name] = json.loads(m.group(0) if m else response.text)
@@ -89,7 +94,6 @@ async def reuse_check(
                     results[class_name] = {"llm_output": getattr(response, "text", str(response))}
                 print("[DEBUG] Processed class:")
                 print(results[class_name])
-            
 
     elif "ttl" in model:
         # JSON-LD
@@ -130,7 +134,7 @@ async def reuse_check(
 
             if i % 30 == 0 and i > 0:
                 await ctx.close_sse_stream()
-            
+
             label = _get_ld_label(class_obj)
             # Find all properties with this class as domain
             properties = []
@@ -165,7 +169,6 @@ async def reuse_check(
                 temperature=0.0,
                 max_tokens=800,
             )
-            import json, re
             m = re.search(r"\{.*\}", getattr(response, "text", str(response)), re.S)
             try:
                 results[label] = json.loads(m.group(0) if m else response.text)
