@@ -1,34 +1,27 @@
 from dotenv import load_dotenv
 from pathlib import Path
 
-project_dir = Path(__file__).resolve().parent
-env_path = project_dir / ".env"
-
-load_dotenv(dotenv_path=env_path)
-
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
 from fastmcp.server.event_store import EventStore
 import resources
 import tools
 
-from tools.index_search.config_loader import VOCABULARIES, VOCABULARY_GUIDANCE
-from tools.index_search.retrieve_documents import retrieve_documents
-from tools.planning_orchestrator.prompts import system_prompt_orchestrator
+project_dir = Path(__file__).resolve().parent
+env_path = project_dir / ".env"
 
-print(f"🚀 Serveur démarré avec {len(VOCABULARIES)} vocabulaires en cache")
-print(f"📝 Prompt généré avec {len(VOCABULARY_GUIDANCE)} caractères")
+load_dotenv(dotenv_path=env_path)
 
 # CHANGE FOR DEPLOYMENT/DEVELOPMENT!
 mcp = FastMCP(
-    name="...", 
+    name="...",
 )
 
 mcp.add_tool(
     Tool.from_function(
         tools.plan_workflow_with_tools,
         name="plan_workflow_with_tools",
-    ), 
+    ),
 )
 
 mcp.add_tool(
@@ -120,7 +113,7 @@ mcp.resource(
 event_store = EventStore()
 app = mcp.http_app(
     event_store=event_store,
-    retry_interval=2000,  
+    retry_interval=2000,
 )
 
 if __name__ == "__main__":
