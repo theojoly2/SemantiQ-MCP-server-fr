@@ -18,8 +18,12 @@ indexing:
 
 search:
   limit: 3
-  candidate_multiplier: 8
-  min_candidates: 50
+  candidate_multiplier: 10
+  min_candidates: 80
   scroll_limit_per_doc: 10000
-  window_radius: 4
-  full_document_chunk_threshold: 12
+  window_radius: 5
+  full_document_chunk_threshold: 15
+
+  aggregation_top_k: 3
+  aggregation_max_weight: 0.8 # poids du score max
+  aggregation_mean_weight: 0.2 # poids de la moyenne des top_k

@@ -208,7 +208,7 @@ DOCUMENTS_PATH = config["indexing"].get("documents_path", "documents")
 SEARCH_LIMIT = int(config.get("search", {}).get("limit", 3))
 
 # Oversampling factor used to fetch more raw candidates before final selection.
-CANDIDATE_MULTIPLIER = int(config.get("search", {}).get("candidate_multiplier", 8))
+CANDIDATE_MULTIPLIER = int(config.get("search", {}).get("candidate_multiplier", 10))
 
 # Minimum number of raw candidates to inspect before post-processing.
 MIN_CANDIDATES = int(config.get("search", {}).get("min_candidates", 30))
@@ -219,7 +219,8 @@ SCROLL_LIMIT_PER_DOC = int(config.get("search", {}).get("scroll_limit_per_doc", 
 # Number of neighboring chunks fetched on each side of a relevant chunk.
 WINDOW_RADIUS = int(config.get("search", {}).get("window_radius", 4))
 
-# If a document has at most this many chunks, the full document can be reconstructed instead of a local window.
+# If a document has at most this many chunks,
+# the full document can be reconstructed instead of a local window.
 FULL_DOCUMENT_CHUNK_THRESHOLD = int(
     config.get("search", {}).get("full_document_chunk_threshold", 12)
 )

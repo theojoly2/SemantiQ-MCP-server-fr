@@ -60,6 +60,24 @@ FULL_DOCUMENT_CHUNK_THRESHOLD: int = int(
     else 12
 )
 
+AGGREGATION_TOP_K: int = int(
+    getattr(cf, "config", {}).get("search", {}).get("aggregation_top_k", 3)
+    if hasattr(cf, "config")
+    else 3
+)
+
+AGGREGATION_MAX_WEIGHT: float = float(
+    getattr(cf, "config", {}).get("search", {}).get("aggregation_max_weight", 0.8)
+    if hasattr(cf, "config")
+    else 0.8
+)
+
+AGGREGATION_MEAN_WEIGHT: float = float(
+    getattr(cf, "config", {}).get("search", {}).get("aggregation_mean_weight", 0.2)
+    if hasattr(cf, "config")
+    else 0.2
+)
+
 
 def detect_model_capabilities(model) -> dict[str, Any]:
     """
@@ -166,47 +184,111 @@ def encode_query(query_text: str, capabilities: dict[str, Any]) -> dict[str, Any
 
 
 def _run_chunk_search(search_terms: str, raw_limit: int):
+    """
+    Recherche hybride dense + sparse avec fusion pondérée:
+    score_hybrid = 0.7 * dense_norm + 0.3 * sparse_norm
+    """
     capabilities = cf.MODEL_CAPABILITIES
     query_vectors = encode_query(search_terms, capabilities)
 
-    if "dense" in query_vectors and "sparse" in query_vectors:
-        return client.query_points(
-            collection_name=COLLECTION,
-            prefetch=[
-                Prefetch(
-                    query=query_vectors["dense"],
-                    using=DENSE_VECTOR_NAME,
-                    limit=raw_limit,
-                ),
-                Prefetch(
-                    query=query_vectors["sparse"],
-                    using=SPARSE_VECTOR_NAME,
-                    limit=raw_limit,
-                ),
-            ],
-            query=FusionQuery(fusion=Fusion.RRF),
-            limit=raw_limit,
-            with_payload=True,
-        )
+    dense_res = None
+    sparse_res = None
 
+    # 1) Requête dense-only si dispo
     if "dense" in query_vectors:
-        return client.query_points(
+        dense_res = client.query_points(
             collection_name=COLLECTION,
             query=query_vectors["dense"],
+            using=DENSE_VECTOR_NAME,  # "dense"
             limit=raw_limit,
             with_payload=True,
         )
 
+    # 2) Requête sparse-only si dispo
     if "sparse" in query_vectors:
-        return client.query_points(
+        sparse_res = client.query_points(
             collection_name=COLLECTION,
             query=query_vectors["sparse"],
-            using=SPARSE_VECTOR_NAME,
+            using=SPARSE_VECTOR_NAME,  # "sparse"
             limit=raw_limit,
             with_payload=True,
         )
 
-    raise ValueError("No query vectors generated")
+    # Si aucune des deux modalités n'est dispo
+    if dense_res is None and sparse_res is None:
+        raise ValueError("No query vectors generated")
+
+    # Si une seule modalité est dispo, on renvoie directement son résultat
+    if sparse_res is None:
+        return dense_res
+    if dense_res is None:
+        return sparse_res
+
+    # 3) Fusion dense + sparse avec pondération 0.7 / 0.3
+
+    # Regrouper par id de point
+    merged: dict[Any, dict[str, Any]] = {}
+
+    for p in dense_res.points:
+        merged[p.id] = {
+            "point": p,
+            "dense": float(p.score),
+            "sparse": 0.0,
+        }
+
+    for p in sparse_res.points:
+        entry = merged.get(p.id)
+        if entry is None:
+            entry = {
+                "point": p,
+                "dense": 0.0,
+                "sparse": 0.0,
+            }
+            merged[p.id] = entry
+        entry["sparse"] = float(p.score)
+
+    # Min-max normalisation pour chaque modalité
+    def minmax(scores: dict[Any, float]) -> dict[Any, float]:
+        if not scores:
+            return {}
+        vals = list(scores.values())
+        vmin, vmax = min(vals), max(vals)
+        if vmax <= vmin:
+            # tous égaux => on met tout à 0
+            return {k: 0.0 for k in scores.keys()}
+        rng = vmax - vmin
+        return {k: (v - vmin) / rng for k, v in scores.items()}
+
+    dense_scores = {pid: v["dense"] for pid, v in merged.items()}
+    sparse_scores = {pid: v["sparse"] for pid, v in merged.items()}
+
+    dense_norm = minmax(dense_scores)
+    sparse_norm = minmax(sparse_scores)
+
+    alpha = 0.7  # poids du dense
+    for pid, v in merged.items():
+        d = dense_norm.get(pid, 0.0)
+        s = sparse_norm.get(pid, 0.0)
+        v["hybrid"] = alpha * d + (1.0 - alpha) * s
+
+    # 4) Trier selon le score hybride et tronquer à raw_limit
+    sorted_points = [
+        merged[pid]["point"]
+        for pid in sorted(
+            merged.keys(),
+            key=lambda pid: merged[pid]["hybrid"],
+            reverse=True,
+        )
+    ][:raw_limit]
+
+    # 5) Retourner un objet compatible avec l'usage existant:
+    #     results = _run_chunk_search(...)
+    #     points = getattr(results, "points", [])
+    class QueryResult:
+        def __init__(self, points):
+            self.points = points
+
+    return QueryResult(sorted_points)
 
 
 def _group_best_chunk_per_document(points: list[Any]) -> list[dict[str, Any]]:
@@ -223,17 +305,43 @@ def _group_best_chunk_per_document(points: list[Any]) -> list[dict[str, Any]]:
         chunk_text = str(payload.get("text", ""))
 
         current = grouped.get(document_id)
-        if current is None or score > current["best_score"]:
+        if current is None:
             grouped[document_id] = {
                 "document_id": document_id,
                 "filename": filename,
+                "scores": [score],
                 "best_score": score,
                 "best_chunk_index": chunk_index,
                 "best_chunk_count": chunk_count,
                 "best_chunk_text": chunk_text,
             }
+            continue
 
-    return sorted(grouped.values(), key=lambda x: x["best_score"], reverse=True)
+        current["scores"].append(score)
+
+        if score > current["best_score"]:
+            current["best_score"] = score
+            current["best_chunk_index"] = chunk_index
+            current["best_chunk_count"] = chunk_count
+            current["best_chunk_text"] = chunk_text
+
+    aggregated_results: list[dict[str, Any]] = []
+
+    for doc in grouped.values():
+        doc = dict(doc)
+        doc["aggregated_score"] = _compute_document_aggregated_score(
+            scores=doc["scores"],
+            top_k=AGGREGATION_TOP_K,
+            max_weight=AGGREGATION_MAX_WEIGHT,
+            mean_weight=AGGREGATION_MEAN_WEIGHT,
+        )
+        aggregated_results.append(doc)
+
+    return sorted(
+        aggregated_results,
+        key=lambda x: (x["aggregated_score"], x["best_score"]),
+        reverse=True,
+    )
 
 
 def _load_document_chunks(document_id: str) -> list[Any]:
@@ -423,6 +531,31 @@ def _rerank_documents(
         reverse=True,
     )
     return reranked
+
+
+def _compute_document_aggregated_score(
+    scores: list[float],
+    top_k: int = AGGREGATION_TOP_K,
+    max_weight: float = AGGREGATION_MAX_WEIGHT,
+    mean_weight: float = AGGREGATION_MEAN_WEIGHT,
+) -> float:
+    if not scores:
+        return 0.0
+
+    sorted_scores = sorted(scores, reverse=True)
+    best_score = sorted_scores[0]
+
+    top_scores = sorted_scores[:max(1, top_k)]
+    mean_top_score = sum(top_scores) / len(top_scores)
+
+    weight_sum = max_weight + mean_weight
+    if weight_sum <= 0:
+        return best_score
+
+    max_weight = max_weight / weight_sum
+    mean_weight = mean_weight / weight_sum
+
+    return (max_weight * best_score) + (mean_weight * mean_top_score)
 
 
 def retrieve_documents(
