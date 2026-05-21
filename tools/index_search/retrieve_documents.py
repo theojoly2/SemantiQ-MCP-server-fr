@@ -18,6 +18,7 @@ except ImportError:
 
 client = cf.client
 model = cf.model
+reranker = cf.reranker
 COLLECTION = cf.COLLECTION
 
 DENSE_VECTOR_NAME = "dense"
@@ -45,6 +46,18 @@ SCROLL_LIMIT_PER_DOC: int = int(
     getattr(cf, "config", {}).get("search", {}).get("scroll_limit_per_doc", 10000)
     if hasattr(cf, "config")
     else 10000
+)
+
+WINDOW_RADIUS: int = int(
+    getattr(cf, "config", {}).get("search", {}).get("window_radius", 4)
+    if hasattr(cf, "config")
+    else 4
+)
+
+FULL_DOCUMENT_CHUNK_THRESHOLD: int = int(
+    getattr(cf, "config", {}).get("search", {}).get("full_document_chunk_threshold", 12)
+    if hasattr(cf, "config")
+    else 12
 )
 
 
@@ -223,7 +236,7 @@ def _group_best_chunk_per_document(points: list[Any]) -> list[dict[str, Any]]:
     return sorted(grouped.values(), key=lambda x: x["best_score"], reverse=True)
 
 
-def _load_full_document(document_id: str) -> tuple[str, str]:
+def _load_document_chunks(document_id: str) -> list[Any]:
     all_points = []
     offset = None
 
@@ -252,10 +265,31 @@ def _load_full_document(document_id: str) -> tuple[str, str]:
         if offset is None:
             break
 
-    ordered = sorted(
+    return sorted(
         all_points,
         key=lambda p: int((p.payload or {}).get("chunk_index", 0)),
     )
+
+
+def _build_partial_header(
+    filename: str,
+    best_chunk_index: int,
+    start_idx: int,
+    end_idx: int,
+    total_chunks: int,
+) -> str:
+    return (
+        "[PARTIAL DOCUMENT ONLY]\n"
+        f"filename={filename}\n"
+        f"best_chunk_index={best_chunk_index}\n"
+        f"returned_chunk_range={start_idx}-{end_idx}\n"
+        f"total_chunks={total_chunks}\n"
+        "note=Only a local window around the best matching chunk is returned, not the full document.\n\n"
+    )
+
+
+def _load_full_document(document_id: str) -> tuple[str, str]:
+    ordered = _load_document_chunks(document_id)
 
     if not ordered:
         return document_id, ""
@@ -270,6 +304,127 @@ def _load_full_document(document_id: str) -> tuple[str, str]:
     return filename, full_text
 
 
+def _load_document_window(
+    document_id: str,
+    best_chunk_index: int,
+    window_radius: int = WINDOW_RADIUS,
+) -> tuple[str, str]:
+    ordered = _load_document_chunks(document_id)
+
+    if not ordered:
+        return document_id, ""
+
+    filename = str((ordered[0].payload or {}).get("filename", document_id))
+    total_chunks = len(ordered)
+
+    start_idx = max(0, best_chunk_index - window_radius)
+    end_idx = min(total_chunks - 1, best_chunk_index + window_radius)
+
+    selected = [
+        p for p in ordered
+        if start_idx <= int((p.payload or {}).get("chunk_index", 0)) <= end_idx
+    ]
+
+    partial_text = "\n".join(
+        str((p.payload or {}).get("text", ""))
+        for p in selected
+        if (p.payload or {}).get("text")
+    ).strip()
+
+    header = _build_partial_header(
+        filename=filename,
+        best_chunk_index=best_chunk_index,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        total_chunks=total_chunks,
+    )
+
+    return filename, header + partial_text
+
+
+def _load_best_view_for_document(
+    document_id: str,
+    best_chunk_index: int,
+    return_full_document: bool = True,
+) -> tuple[str, str]:
+    ordered = _load_document_chunks(document_id)
+
+    if not ordered:
+        return document_id, ""
+
+    filename = str((ordered[0].payload or {}).get("filename", document_id))
+    total_chunks = len(ordered)
+
+    if not return_full_document:
+        for p in ordered:
+            payload = p.payload or {}
+            if int(payload.get("chunk_index", 0)) == best_chunk_index:
+                return filename, str(payload.get("text", ""))
+        return filename, ""
+
+    if total_chunks <= FULL_DOCUMENT_CHUNK_THRESHOLD:
+        full_text = "\n".join(
+            str((p.payload or {}).get("text", ""))
+            for p in ordered
+            if (p.payload or {}).get("text")
+        ).strip()
+        return filename, full_text
+
+    start_idx = max(0, best_chunk_index - WINDOW_RADIUS)
+    end_idx = min(total_chunks - 1, best_chunk_index + WINDOW_RADIUS)
+
+    selected = [
+        p for p in ordered
+        if start_idx <= int((p.payload or {}).get("chunk_index", 0)) <= end_idx
+    ]
+
+    partial_text = "\n".join(
+        str((p.payload or {}).get("text", ""))
+        for p in selected
+        if (p.payload or {}).get("text")
+    ).strip()
+
+    header = _build_partial_header(
+        filename=filename,
+        best_chunk_index=best_chunk_index,
+        start_idx=start_idx,
+        end_idx=end_idx,
+        total_chunks=total_chunks,
+    )
+
+    return filename, header + partial_text
+
+
+def _rerank_documents(
+    query: str,
+    docs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not docs:
+        return []
+
+    pairs = [
+        [query, doc.get("rerank_text", "")]
+        for doc in docs
+    ]
+
+    scores = reranker.compute_score(pairs)
+
+    if not isinstance(scores, list):
+        scores = [scores]
+
+    reranked = []
+    for doc, rerank_score in zip(docs, scores):
+        item = dict(doc)
+        item["rerank_score"] = float(rerank_score)
+        reranked.append(item)
+
+    reranked.sort(
+        key=lambda x: (x["rerank_score"], x["best_score"]),
+        reverse=True,
+    )
+    return reranked
+
+
 def retrieve_documents(
     search_terms: str,
     limit: int = 10,
@@ -277,8 +432,9 @@ def retrieve_documents(
 ) -> List[Tuple[str, str, float]]:
     """
     Search over child chunks, group hits by document_id,
-    keep the best child score for ranking,
-    then return either the best chunk or the reconstructed full document.
+    retrieve candidate document views,
+    rerank them with a cross-encoder,
+    then return the best reranked documents.
     """
     if limit is None:
         limit = SEARCH_LIMIT
@@ -291,18 +447,30 @@ def retrieve_documents(
         if not points:
             return []
 
-        ranked_docs = _group_best_chunk_per_document(points)[:limit]
+        grouped_docs = _group_best_chunk_per_document(points)
+
+        candidate_docs: list[dict[str, Any]] = []
+        for doc in grouped_docs:
+            filename, text = _load_best_view_for_document(
+                document_id=doc["document_id"],
+                best_chunk_index=doc["best_chunk_index"],
+                return_full_document=return_full_document,
+            )
+
+            candidate_docs.append({
+                **doc,
+                "filename": filename,
+                "text": text,
+                "rerank_text": text,
+            })
+
+        reranked_docs = _rerank_documents(search_terms, candidate_docs)[:limit]
 
         final_results: List[Tuple[str, str, float]] = []
-
-        for doc in ranked_docs:
-            if return_full_document:
-                filename, text = _load_full_document(doc["document_id"])
-            else:
-                filename = doc["filename"]
-                text = doc["best_chunk_text"]
-
-            final_results.append((filename, text, doc["best_score"]))
+        for doc in reranked_docs:
+            final_results.append(
+                (doc["filename"], doc["text"], doc["rerank_score"])
+            )
 
         return final_results
 

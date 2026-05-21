@@ -1,13 +1,12 @@
 from pathlib import Path
 import sys
 
-CURRENT_DIR = Path(__file__).resolve().parent
-PARENT_DIR = CURRENT_DIR.parent
-sys.path.insert(0, str(PARENT_DIR))
-
 from retrieve_documents import retrieve_documents
 from . import config as cf
 
+CURRENT_DIR = Path(__file__).resolve().parent
+PARENT_DIR = CURRENT_DIR.parent
+sys.path.insert(0, str(PARENT_DIR))
 
 client = cf.client
 COLLECTION = cf.COLLECTION
