@@ -513,7 +513,7 @@ def _rerank_documents(
         for doc in docs
     ]
 
-    scores = reranker.compute_score(pairs)
+    scores = reranker.compute_score(pairs, normalize=True)
 
     if not isinstance(scores, list):
         scores = [scores]
