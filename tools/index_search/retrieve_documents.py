@@ -2,9 +2,6 @@ from typing import List, Any, Tuple, Dict
 
 from qdrant_client.models import (
     SparseVector,
-    Prefetch,
-    FusionQuery,
-    Fusion,
     Filter,
     FieldCondition,
     MatchValue,
@@ -392,7 +389,8 @@ def _build_partial_header(
         f"best_chunk_index={best_chunk_index}\n"
         f"returned_chunk_range={start_idx}-{end_idx}\n"
         f"total_chunks={total_chunks}\n"
-        "note=Only a local window around the best matching chunk is returned, not the full document.\n\n"
+        "note=Only a local window around the best matching chunk is returned,\
+        not the full document.\n\n"
     )
 
 
