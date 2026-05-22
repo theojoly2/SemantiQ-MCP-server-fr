@@ -527,6 +527,9 @@ def retrieve_documents(
     if limit is None:
         limit = SEARCH_LIMIT
 
+    if limit < 5:
+        limit = 8
+
     try:
         raw_limit = max(
             MIN_CANDIDATES,
@@ -581,7 +584,7 @@ def retrieve_documents(
 
 if __name__ == "__main__":
     query = input("Query: ").strip()
-    results = retrieve_documents(query, limit=5, return_full_document=True)
+    results = retrieve_documents(query, limit=8, return_full_document=True)
 
     print("=" * 80)
     print(f"Results for: {query}")
