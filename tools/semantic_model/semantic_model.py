@@ -1146,24 +1146,46 @@ def find_class_by_label_or_xmi(g: Graph, class_name: str, package_name: str | No
     return None
 
 
-def _find_class_result(model: dict[str, Any], title: str | None = None, element_id: str | None = None) -> dict[str, Any]:
+def _find_class_result(
+    model: dict[str, Any],
+    title: str | None = None,
+    uri: str | None = None,
+) -> dict[str, Any]:
     for el in model.get("xmi", {}).get("elements", []):
         if el.get("type") != "uml:Class":
             continue
-        if element_id and el.get("ID") == element_id:
-            return el
+        if uri:
+            for tag in el.get("tags", []):
+                if tag.get("name") == "uri" and tag.get("value") == uri:
+                    return el
         if title and _canonical_text(el.get("name")) == _canonical_text(title):
             return el
     return {}
 
 
-def _find_attribute_result(model: dict[str, Any], class_name: str, attr_uri: str) -> dict[str, Any]:
+def _find_attribute_result(
+    model: dict[str, Any],
+    class_name: str,
+    attr_uri: str,
+    class_uri: str = "",
+) -> dict[str, Any]:
     for el in model.get("xmi", {}).get("elements", []):
-        if el.get("type") == "uml:Class" and _canonical_text(el.get("name")) == _canonical_text(class_name):
-            for attr in el.get("attributes", []):
-                for tag in attr.get("tags_attribute", []):
-                    if tag.get("name") == "uri" and tag.get("value") == attr_uri:
-                        return attr
+        if el.get("type") != "uml:Class":
+            continue
+
+        name_match = _canonical_text(el.get("name")) == _canonical_text(class_name)
+        uri_match = class_uri and any(
+            tag.get("name") == "uri" and tag.get("value") == class_uri
+            for tag in el.get("tags", [])
+        )
+
+        if not name_match and not uri_match:
+            continue
+
+        for attr in el.get("attributes", []):
+            for tag in attr.get("tags_attribute", []):
+                if tag.get("name") == "uri" and tag.get("value") == attr_uri:
+                    return attr
     return {}
 
 
@@ -1205,10 +1227,9 @@ def add_class(
     user: str = "",
     name: str = "",
     package: str | None = None,
-    ID: str | None = None,
+    uri: str | None = None,
 ) -> dict[str, Any]:
     package = package or ""
-    ID = ID or ""
 
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
@@ -1223,17 +1244,24 @@ def add_class(
             source_format=_default_source_format(model),
         )
         _save_model(fp, model)
-        return _find_class_result(model, title=title, element_id=ID or None) or {
+        return _find_class_result(model, title=title) or {
             "error": f"La classe '{title}' existe déjà."
         }
 
-    class_uri = _coerce_class_uri(ID, title)
+    raw_uri = _norm_text(uri)
+    if raw_uri and (
+        raw_uri.startswith("http://")
+        or raw_uri.startswith("https://")
+        or raw_uri.startswith("urn:")
+    ):
+        class_uri = URIRef(raw_uri)
+    else:
+        class_uri = URIRef(f"urn:class:{_slugify_uri(title)}")
+
     g.add((class_uri, RDF.type, OWL.Class))
     _set_literal(g, class_uri, RDFS.label, title, lang="fr")
     _set_literal(g, class_uri, RDFS.comment, definition, lang="fr")
     _set_literal(g, class_uri, SKOS.scopeNote, usage_note, lang="fr")
-    if ID:
-        _set_literal(g, class_uri, UML_META.eaid, ID)
 
     model = _sync_model_from_graph(
         g,
@@ -1243,7 +1271,7 @@ def add_class(
     )
     model = _save_model(fp, model)
 
-    return _find_class_result(model, title=title, element_id=ID or None) or {
+    return _find_class_result(model, title=title) or {
         "error": f"Classe '{title}' créée mais introuvable dans le résultat."
     }
 
@@ -1289,14 +1317,13 @@ def add_attribute(
     )
     model = _save_model(fp, model)
 
-    return _find_attribute_result(model, class_name=class_name, attr_uri=attr_uri) or {
+    return _find_attribute_result(
+        model,
+        class_name=class_name,
+        attr_uri=attr_uri,
+        class_uri=str(class_uri),   # ← fix : recherche par URI si le nom normalisé ne matche pas
+    ) or {
         "error": f"Attribut '{attr_label}' créé mais introuvable dans le résultat."
-    }
-    return _find_attribute_result(model, classname=class_name, attruri=attr_uri) or {
-        "warning": (
-            f"Attribut '{attr_label}' créé en owl:DatatypeProperty "
-            f"avec type '{canonical_range_uri}', mais introuvable dans le résultat reconstruit."
-        )
     }
 
 
