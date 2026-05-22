@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 from typing import List, Tuple, Union
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModel
 
 load_dotenv()
 
@@ -20,35 +20,50 @@ with CONFIG_PATH.open("r", encoding="utf-8") as f:
 
 class HFTransformerReranker:
     """
-    Reranker basé directement sur Hugging Face Transformers.
+    Reranker basé sur Hugging Face Transformers.
 
-    Cette classe remplace l'utilisation de FlagEmbedding.FlagReranker pour les
-    modèles de type BAAI/bge-reranker-* afin d'éviter les problèmes de compatibilité
-    entre FlagEmbedding et les versions récentes de `transformers`.
-    Elle expose une méthode `compute_score` proche de celle de FlagReranker,
-    mais s'appuie uniquement sur AutoTokenizer + AutoModelForSequenceClassification.
+    Supporte :
+    - les modèles de type BAAI/bge-reranker-* via AutoModelForSequenceClassification,
+    - le modèle jinaai/jina-reranker-v3 via AutoModel(trust_remote_code=True)
+      et sa méthode listwise `model.rerank(query, documents, ...)`.
     """
 
     def __init__(self, model_name: str, use_fp16: bool = True, device: str = None):
         self.model_name = model_name
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self.model.eval()
+        # Détection simple du mode Jina v3 listwise
+        self.is_jina_listwise = "jina-reranker-v3" in model_name
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = device
+
+        if self.is_jina_listwise:
+            # Jina v3 : modèle avec code distant et méthode .rerank(query, documents, ...)
+            self.tokenizer = None
+            self.model = AutoModel.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                torch_dtype="auto",
+            )
+        else:
+            # BGE & autres rerankers "classiques" (sequence classification)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
+
+        self.model.eval()
         self.model.to(self.device)
 
         self.use_fp16 = use_fp16 and (self.device == "cuda")
+        if self.use_fp16:
+            self.model = self.model.to(dtype=torch.float16)
 
     @torch.inference_mode()
     def compute_score(
         self,
         sentence_pairs: Union[Tuple[str, str], List[Tuple[str, str]]],
         normalize: bool = False,
-        max_length: int = 512,
+        max_length: int = 512,  # garde le param pour BGE, mais PAS utilisé pour Jina v3
     ):
         # Autoriser un seul couple ou une liste de couples
         if isinstance(sentence_pairs, tuple):
@@ -56,6 +71,42 @@ class HFTransformerReranker:
         else:
             pairs = list(sentence_pairs)
 
+        # ------- Mode Jina v3 : listwise reranking via model.rerank(query, documents) -------
+        if self.is_jina_listwise:
+            # On suppose le cas classique "une seule requête, plusieurs documents"
+            queries = [q for q, _ in pairs]
+            docs = [d for _, d in pairs]
+
+            unique_queries = list(dict.fromkeys(queries))
+            if len(unique_queries) != 1:
+                raise ValueError(
+                    "HFTransformerReranker (jina-reranker-v3) attend une seule query "
+                    "pour plusieurs documents. Toutes les paires doivent partager la même query."
+                )
+            query = unique_queries[0]
+
+            # Signature officielle v3 : rerank(query, documents, top_n=None, return_embeddings=False)
+            # → pas de max_length / max_doc_length ici. [web:296]
+            result = self.model.rerank(
+                query=query,
+                documents=docs,
+                top_n=None,             # on garde tout
+                return_embeddings=False,
+            )
+
+            # On reconstruit une liste de scores alignée sur l’ordre des docs
+            scores = [0.0] * len(docs)
+            for item in result:
+                idx = item.get("index")
+                score = item.get("relevance_score", item.get("score", 0.0))
+                if idx is not None and 0 <= idx < len(docs):
+                    scores[idx] = float(score)
+
+            if isinstance(sentence_pairs, tuple):
+                return scores[0]
+            return scores
+
+        # ------- Mode BGE / cross-encoder classique : pairwise (query, doc) → logit -------
         queries = [q for q, _ in pairs]
         docs = [d for _, d in pairs]
 
@@ -68,14 +119,11 @@ class HFTransformerReranker:
             return_tensors="pt",
         ).to(self.device)
 
-        if self.use_fp16:
-            self.model = self.model.to(dtype=torch.float16)
-
         logits = self.model(**inputs).logits.view(-1)
 
         scores = logits.float()
         if normalize:
-            scores = torch.sigmoid(scores)  # map vers [0, 1]
+            scores = torch.sigmoid(scores)
 
         scores = scores.cpu().tolist()
         if isinstance(sentence_pairs, tuple):

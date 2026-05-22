@@ -1,4 +1,5 @@
 from typing import List, Any, Tuple, Dict
+from collections import defaultdict
 
 from qdrant_client.models import (
     SparseVector,
@@ -34,9 +35,21 @@ CANDIDATE_MULTIPLIER: int = int(
 )
 
 MIN_CANDIDATES: int = int(
-    getattr(cf, "config", {}).get("search", {}).get("min_candidates", 30)
+    getattr(cf, "config", {}).get("search", {}).get("min_candidates", 80)
     if hasattr(cf, "config")
-    else 30
+    else 80
+)
+
+RERANK_POOL_SIZE: int = int(
+    getattr(cf, "config", {}).get("search", {}).get("rerank_pool_size", 24)
+    if hasattr(cf, "config")
+    else 24
+)
+
+MAX_CHUNKS_PER_DOCUMENT: int = int(
+    getattr(cf, "config", {}).get("search", {}).get("max_chunks_per_document", 3)
+    if hasattr(cf, "config")
+    else 3
 )
 
 SCROLL_LIMIT_PER_DOC: int = int(
@@ -64,22 +77,25 @@ AGGREGATION_TOP_K: int = int(
 )
 
 AGGREGATION_MAX_WEIGHT: float = float(
-    getattr(cf, "config", {}).get("search", {}).get("aggregation_max_weight", 0.8)
+    getattr(cf, "config", {}).get("search", {}).get("aggregation_max_weight", 0.9)
     if hasattr(cf, "config")
-    else 0.8
+    else 0.9
 )
 
 AGGREGATION_MEAN_WEIGHT: float = float(
-    getattr(cf, "config", {}).get("search", {}).get("aggregation_mean_weight", 0.2)
+    getattr(cf, "config", {}).get("search", {}).get("aggregation_mean_weight", 0.1)
     if hasattr(cf, "config")
-    else 0.2
+    else 0.1
+)
+
+HYBRID_DENSE_WEIGHT: float = float(
+    getattr(cf, "config", {}).get("search", {}).get("hybrid_dense_weight", 0.7)
+    if hasattr(cf, "config")
+    else 0.7
 )
 
 
 def detect_model_capabilities(model) -> dict[str, Any]:
-    """
-    Detect if the loaded model supports dense vectors, sparse vectors, or both.
-    """
     capabilities = {
         "has_dense": False,
         "has_sparse": False,
@@ -130,9 +146,6 @@ def _lexical_to_sparse_vector(lexical_weights: dict[Any, Any]) -> SparseVector:
 
 
 def encode_query(query_text: str, capabilities: dict[str, Any]) -> dict[str, Any]:
-    """
-    Encode a query into dense and/or sparse vectors depending on model capabilities.
-    """
     outputs: dict[str, Any] = {}
 
     if capabilities["has_dense"] and capabilities["has_sparse"]:
@@ -181,49 +194,38 @@ def encode_query(query_text: str, capabilities: dict[str, Any]) -> dict[str, Any
 
 
 def _run_chunk_search(search_terms: str, raw_limit: int):
-    """
-    Recherche hybride dense + sparse avec fusion pondérée:
-    score_hybrid = 0.7 * dense_norm + 0.3 * sparse_norm
-    """
     capabilities = cf.MODEL_CAPABILITIES
     query_vectors = encode_query(search_terms, capabilities)
 
     dense_res = None
     sparse_res = None
 
-    # 1) Requête dense-only si dispo
     if "dense" in query_vectors:
         dense_res = client.query_points(
             collection_name=COLLECTION,
             query=query_vectors["dense"],
-            using=DENSE_VECTOR_NAME,  # "dense"
+            using=DENSE_VECTOR_NAME,
             limit=raw_limit,
             with_payload=True,
         )
 
-    # 2) Requête sparse-only si dispo
     if "sparse" in query_vectors:
         sparse_res = client.query_points(
             collection_name=COLLECTION,
             query=query_vectors["sparse"],
-            using=SPARSE_VECTOR_NAME,  # "sparse"
+            using=SPARSE_VECTOR_NAME,
             limit=raw_limit,
             with_payload=True,
         )
 
-    # Si aucune des deux modalités n'est dispo
     if dense_res is None and sparse_res is None:
         raise ValueError("No query vectors generated")
 
-    # Si une seule modalité est dispo, on renvoie directement son résultat
     if sparse_res is None:
         return dense_res
     if dense_res is None:
         return sparse_res
 
-    # 3) Fusion dense + sparse avec pondération 0.7 / 0.3
-
-    # Regrouper par id de point
     merged: dict[Any, dict[str, Any]] = {}
 
     for p in dense_res.points:
@@ -244,14 +246,12 @@ def _run_chunk_search(search_terms: str, raw_limit: int):
             merged[p.id] = entry
         entry["sparse"] = float(p.score)
 
-    # Min-max normalisation pour chaque modalité
     def minmax(scores: dict[Any, float]) -> dict[Any, float]:
         if not scores:
             return {}
         vals = list(scores.values())
         vmin, vmax = min(vals), max(vals)
         if vmax <= vmin:
-            # tous égaux => on met tout à 0
             return {k: 0.0 for k in scores.keys()}
         rng = vmax - vmin
         return {k: (v - vmin) / rng for k, v in scores.items()}
@@ -262,13 +262,17 @@ def _run_chunk_search(search_terms: str, raw_limit: int):
     dense_norm = minmax(dense_scores)
     sparse_norm = minmax(sparse_scores)
 
-    alpha = 0.7  # poids du dense
+    alpha = HYBRID_DENSE_WEIGHT
     for pid, v in merged.items():
         d = dense_norm.get(pid, 0.0)
         s = sparse_norm.get(pid, 0.0)
-        v["hybrid"] = alpha * d + (1.0 - alpha) * s
+        hybrid = alpha * d + (1.0 - alpha) * s
+        v["hybrid"] = hybrid
+        try:
+            v["point"].score = hybrid
+        except Exception:
+            pass
 
-    # 4) Trier selon le score hybride et tronquer à raw_limit
     sorted_points = [
         merged[pid]["point"]
         for pid in sorted(
@@ -278,14 +282,29 @@ def _run_chunk_search(search_terms: str, raw_limit: int):
         )
     ][:raw_limit]
 
-    # 5) Retourner un objet compatible avec l'usage existant:
-    #     results = _run_chunk_search(...)
-    #     points = getattr(results, "points", [])
     class QueryResult:
         def __init__(self, points):
             self.points = points
 
     return QueryResult(sorted_points)
+
+
+def _limit_chunks_per_document(
+    points: list[Any],
+    max_chunks_per_document: int = MAX_CHUNKS_PER_DOCUMENT,
+) -> list[Any]:
+    counts: dict[str, int] = defaultdict(int)
+    limited: list[Any] = []
+
+    for point in points:
+        payload = point.payload or {}
+        document_id = str(payload.get("document_id") or payload.get("filename") or point.id)
+        if counts[document_id] >= max_chunks_per_document:
+            continue
+        limited.append(point)
+        counts[document_id] += 1
+
+    return limited
 
 
 def _group_best_chunk_per_document(points: list[Any]) -> list[dict[str, Any]]:
@@ -389,63 +408,8 @@ def _build_partial_header(
         f"best_chunk_index={best_chunk_index}\n"
         f"returned_chunk_range={start_idx}-{end_idx}\n"
         f"total_chunks={total_chunks}\n"
-        "note=Only a local window around the best matching chunk is returned,\
-        not the full document.\n\n"
+        "note=Only a local window around the best matching chunk is returned, not the full document.\n\n"
     )
-
-
-def _load_full_document(document_id: str) -> tuple[str, str]:
-    ordered = _load_document_chunks(document_id)
-
-    if not ordered:
-        return document_id, ""
-
-    filename = str((ordered[0].payload or {}).get("filename", document_id))
-    full_text = "\n".join(
-        str((p.payload or {}).get("text", ""))
-        for p in ordered
-        if (p.payload or {}).get("text")
-    ).strip()
-
-    return filename, full_text
-
-
-def _load_document_window(
-    document_id: str,
-    best_chunk_index: int,
-    window_radius: int = WINDOW_RADIUS,
-) -> tuple[str, str]:
-    ordered = _load_document_chunks(document_id)
-
-    if not ordered:
-        return document_id, ""
-
-    filename = str((ordered[0].payload or {}).get("filename", document_id))
-    total_chunks = len(ordered)
-
-    start_idx = max(0, best_chunk_index - window_radius)
-    end_idx = min(total_chunks - 1, best_chunk_index + window_radius)
-
-    selected = [
-        p for p in ordered
-        if start_idx <= int((p.payload or {}).get("chunk_index", 0)) <= end_idx
-    ]
-
-    partial_text = "\n".join(
-        str((p.payload or {}).get("text", ""))
-        for p in selected
-        if (p.payload or {}).get("text")
-    ).strip()
-
-    header = _build_partial_header(
-        filename=filename,
-        best_chunk_index=best_chunk_index,
-        start_idx=start_idx,
-        end_idx=end_idx,
-        total_chunks=total_chunks,
-    )
-
-    return filename, header + partial_text
 
 
 def _load_best_view_for_document(
@@ -525,7 +489,7 @@ def _rerank_documents(
         reranked.append(item)
 
     reranked.sort(
-        key=lambda x: (x["rerank_score"], x["best_score"]),
+        key=lambda x: (x["rerank_score"], x["aggregated_score"], x["best_score"]),
         reverse=True,
     )
     return reranked
@@ -542,7 +506,6 @@ def _compute_document_aggregated_score(
 
     sorted_scores = sorted(scores, reverse=True)
     best_score = sorted_scores[0]
-
     top_scores = sorted_scores[:max(1, top_k)]
     mean_top_score = sum(top_scores) / len(top_scores)
 
@@ -561,27 +524,32 @@ def retrieve_documents(
     limit: int = 10,
     return_full_document: bool = True,
 ) -> List[Tuple[str, str, float]]:
-    """
-    Search over child chunks, group hits by document_id,
-    retrieve candidate document views,
-    rerank them with a cross-encoder,
-    then return the best reranked documents.
-    """
     if limit is None:
         limit = SEARCH_LIMIT
 
     try:
-        raw_limit = max(limit * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
+        raw_limit = max(
+            MIN_CANDIDATES,
+            RERANK_POOL_SIZE * 4,
+            limit * CANDIDATE_MULTIPLIER,
+        )
+
         results = _run_chunk_search(search_terms, raw_limit)
         points = getattr(results, "points", [])
 
         if not points:
             return []
 
+        points = _limit_chunks_per_document(
+            points,
+            max_chunks_per_document=MAX_CHUNKS_PER_DOCUMENT,
+        )
+
         grouped_docs = _group_best_chunk_per_document(points)
+        stable_candidate_docs = grouped_docs[:RERANK_POOL_SIZE]
 
         candidate_docs: list[dict[str, Any]] = []
-        for doc in grouped_docs:
+        for doc in stable_candidate_docs:
             filename, text = _load_best_view_for_document(
                 document_id=doc["document_id"],
                 best_chunk_index=doc["best_chunk_index"],
@@ -595,10 +563,11 @@ def retrieve_documents(
                 "rerank_text": text,
             })
 
-        reranked_docs = _rerank_documents(search_terms, candidate_docs)[:limit]
+        reranked_docs = _rerank_documents(search_terms, candidate_docs)
+        final_docs = reranked_docs[:limit]
 
         final_results: List[Tuple[str, str, float]] = []
-        for doc in reranked_docs:
+        for doc in final_docs:
             final_results.append(
                 (doc["filename"], doc["text"], doc["rerank_score"])
             )
