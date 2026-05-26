@@ -77,7 +77,8 @@ def get_model_path(user: str = "", name: str = "") -> str:
 
 def _model_uri(user: str, name: str) -> URIRef:
     return URIRef(
-        f"urn:ai4semantics:model:{_slugify_uri(user or 'default')}:{_slugify_uri(name or 'generated')}"
+        f"urn:ai4semantics:model:{
+            _slugify_uri(user or 'default')}:{_slugify_uri(name or 'generated')}"
     )
 
 
@@ -196,7 +197,11 @@ def _add_uri(g: Graph, s: URIRef, p: URIRef, value: URIRef | str | None) -> None
 
 def _coerce_class_uri(value: str | None, fallback_label: str) -> URIRef:
     value = _norm_text(value)
-    if value and (value.startswith("http://") or value.startswith("https://") or value.startswith("urn:")):
+    if value and (
+                  value.startswith("http://") or
+                  value.startswith("https://") or
+                  value.startswith("urn:")
+                  ):
         return URIRef(value)
     if value:
         return URIRef(f"urn:eaid:{value}")
@@ -712,7 +717,8 @@ def _sync_model_from_graph(
         json_ld_str = json_ld_str.decode("utf-8")
 
     model["ttl"] = json.loads(json_ld_str) if json_ld_str else {}
-    model["ttl_raw"] = ttl_raw.decode("utf-8") if isinstance(ttl_raw, (bytes, bytearray)) else str(ttl_raw)
+    model["ttl_raw"] = ttl_raw.decode(
+        "utf-8") if isinstance(ttl_raw, (bytes, bytearray)) else str(ttl_raw)
     model["xmi"] = xmi
     model["elements"] = xmi.get("elements", [])
     model["connectors"] = xmi.get("connectors", [])
@@ -845,7 +851,9 @@ def build_graph_from_xmi_model(
 
             g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
             g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
-            g.add((prop_uri, RDF.type, OWL.DatatypeProperty if is_primitive else OWL.ObjectProperty))
+            g.add(
+                (prop_uri, RDF.type, OWL.DatatypeProperty if is_primitive else OWL.ObjectProperty)
+            )
 
             _set_literal(g, prop_uri, RDFS.label, attr_label, lang="fr")
             _set_literal(g, prop_uri, RDFS.comment, attr_definition, lang="fr")
@@ -906,7 +914,9 @@ def build_graph_from_xmi_model(
 
         semantic_uri = _semantic_uri_from_connector_view(conn)
         if not semantic_uri:
-            semantic_uri = f"urn:relation:{_slugify_uri(_safe_xmi_value(conn.get('name')) or 'relation')}"
+            semantic_uri = f"urn:relation:{
+                _slugify_uri(_safe_xmi_value(conn.get('name')) or 'relation')
+            }"
 
         prop_uri = URIRef(semantic_uri)
         rel_label = (
@@ -935,10 +945,18 @@ def build_graph_from_xmi_model(
 
         _set_literal(g, prop_uri, UML_META.relationshipType, relationship)
 
-        _set_literal_if_absent(g, prop_uri, UML_META.leftMultiplicity, _safe_xmi_value(conn.get("lb")))
-        _set_literal_if_absent(g, prop_uri, UML_META.rightMultiplicity, _safe_xmi_value(conn.get("rb")))
-        _set_literal_if_absent(g, prop_uri, UML_META.leftRole, _safe_xmi_value(conn.get("lt")))
-        _set_literal_if_absent(g, prop_uri, UML_META.rightRole, _safe_xmi_value(conn.get("rt")))
+        _set_literal_if_absent(
+            g, prop_uri, UML_META.leftMultiplicity, _safe_xmi_value(conn.get("lb"))
+        )
+        _set_literal_if_absent(
+            g, prop_uri, UML_META.rightMultiplicity, _safe_xmi_value(conn.get("rb"))
+        )
+        _set_literal_if_absent(
+            g, prop_uri, UML_META.leftRole, _safe_xmi_value(conn.get("lt"))
+        )
+        _set_literal_if_absent(
+            g, prop_uri, UML_META.rightRole, _safe_xmi_value(conn.get("rt"))
+        )
 
     return g
 
@@ -1123,7 +1141,8 @@ def find_class_by_label(g: Graph, class_name: str) -> URIRef | None:
     return None
 
 
-def find_class_by_label_or_xmi(g: Graph, class_name: str, package_name: str | None = None) -> URIRef | None:
+def find_class_by_label_or_xmi(
+        g: Graph, class_name: str, package_name: str | None = None) -> URIRef | None:
     found = find_class_by_label(g, class_name)
     if found:
         return found
@@ -1211,8 +1230,10 @@ def _find_connector_result(
         if (
             semantic_match
             and ((not relationship) or _safe_xmi_value(conn.get("relationship")) == relationship)
-            and ((not source_name) or _canonical_text(conn.get("source_name")) == _canonical_text(source_name))
-            and ((not target_name) or _canonical_text(conn.get("target_name")) == _canonical_text(target_name))
+            and ((not source_name)
+                 or _canonical_text(conn.get("source_name")) == _canonical_text(source_name))
+            and ((not target_name)
+                 or _canonical_text(conn.get("target_name")) == _canonical_text(target_name))
             and ((not rel_label) or _canonical_text(conn.get("name")) == _canonical_text(rel_label))
         ):
             return conn
@@ -1394,7 +1415,8 @@ def add_connector(
         "connector_id": connector_id,
         "semantic_uri": connector_semantic_uri,
         "relationship": relationship,
-        "name": rel_label or ("subClassOf" if relationship == "Generalization" else local_name(rel_uri)),
+        "name": rel_label or ("subClassOf" if relationship == "Generalization"
+                              else local_name(rel_uri)),
         "lb": lb,
         "lt": lt,
         "rb": rb,
