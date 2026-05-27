@@ -527,7 +527,7 @@ def retrieve_documents(
     if limit is None:
         limit = SEARCH_LIMIT
 
-    if limit < 5:
+    if limit < 8:
         limit = 8
 
     try:
