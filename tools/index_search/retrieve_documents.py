@@ -527,9 +527,6 @@ def retrieve_documents(
     if limit is None:
         limit = SEARCH_LIMIT
 
-    if limit < 8:
-        limit = 8
-
     try:
         raw_limit = max(
             MIN_CANDIDATES,
