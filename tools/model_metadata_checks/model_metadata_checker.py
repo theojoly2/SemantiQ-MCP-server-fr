@@ -17,6 +17,7 @@ STYLE_GYDE_XLS_PATH = Path(config["file_paths"]["style_guide_xls"])
 df = pd.read_excel(STYLE_GYDE_XLS_PATH, index_col="Rule")
 RULES_DICT = df.to_dict(orient="index")
 
+
 def extract_classes_associations(model: dict[str, Any], names: list[str]) -> dict[str, Any]:
     """
     Extracts classes and associations from the model whose names are in the provided list.
