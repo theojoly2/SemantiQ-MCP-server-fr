@@ -774,165 +774,487 @@ def build_graph_from_xmi_model(
     user: str = "",
     name: str = "",
 ) -> Graph:
-    xmi = _xmi_view(model)
-    elements = xmi.get("elements", [])
-    connectors = xmi.get("connectors", [])
+    import xml.etree.ElementTree as ET
+
+    NS_XMI = "http://schema.omg.org/spec/XMI/2.1"
+    NS_UML = "http://schema.omg.org/spec/UML/2.1"
+
+    def _local(tag: str) -> str:
+        return tag.split("}", 1)[1] if tag.startswith("{") else tag
+
+    def _attr(el: ET.Element, name: str, default: str = "") -> str:
+        return _norm_text(el.get(name)) or default
+
+    def _xmi_attr(el: ET.Element, name: str, default: str = "") -> str:
+        return _norm_text(el.get(f"{{{NS_XMI}}}{name}")) or default
+
+    def _find_direct_children(el: ET.Element, local_name: str) -> list[ET.Element]:
+        return [child for child in list(el) if _local(child.tag) == local_name]
+
+    def _find_first_direct_child(el: ET.Element, local_name: str) -> ET.Element | None:
+        for child in list(el):
+            if _local(child.tag) == local_name:
+                return child
+        return None
+
+    def _comment_body(el: ET.Element) -> str:
+        parts: list[str] = []
+        for c in _find_direct_children(el, "ownedComment"):
+            body = _find_first_direct_child(c, "body")
+            if body is not None and _norm_text(body.text):
+                parts.append(_norm_text(body.text) or "")
+        return "\n".join(p for p in parts if p).strip()
+
+    def _parse_semantic_comment(body: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for raw_line in (body or "").splitlines():
+            line = raw_line.strip()
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            k = _canonical_text(key)
+            v = value.strip()
+            if not v:
+                continue
+            if k == "uri":
+                out["uri"] = v
+            elif k == "label":
+                out["label"] = v
+            elif k == "definition":
+                out["definition"] = v
+            elif k in {"usage note", "usagenote"}:
+                out["usage_note"] = v
+            elif k == "referenced":
+                out["referenced"] = v
+            elif k == "connector id":
+                out["connector_id"] = v
+        return out
+
+    def _classifier_uri_from_xml(el: ET.Element) -> URIRef:
+        body = _comment_body(el)
+        meta = _parse_semantic_comment(body)
+        uri = _norm_text(meta.get("uri"))
+        if uri:
+            return URIRef(uri)
+
+        el_id = _xmi_attr(el, "id")
+        el_name = _attr(el, "name")
+        if el_id:
+            return URIRef(f"urn:eaid:{el_id}")
+        return URIRef(f"urn:class:{_slugify_uri(el_name or 'generated')}")
+
+    def _property_uri_from_xml(owner_uri: URIRef, prop_el: ET.Element) -> URIRef:
+        body = _comment_body(prop_el)
+        meta = _parse_semantic_comment(body)
+        uri = _norm_text(meta.get("uri"))
+        if uri:
+            return URIRef(uri)
+
+        prop_name = _attr(prop_el, "name") or "attribute"
+        return URIRef(f"{str(owner_uri)}#{_slugify_uri(prop_name)}")
+
+    def _resolve_type_from_owned_attribute(
+        prop_el: ET.Element,
+        classifier_uri_by_id: dict[str, URIRef],
+    ) -> tuple[str | None, bool]:
+        type_id = _attr(prop_el, "type")
+        if type_id and type_id in classifier_uri_by_id:
+            return (str(classifier_uri_by_id[type_id]), False)
+
+        type_child = _find_first_direct_child(prop_el, "type")
+        if type_child is not None:
+            href = _attr(type_child, "href")
+            if href:
+                primitive_name = href.split("#")[-1]
+                primitive_map = {
+                    "String": str(XSD.string),
+                    "Boolean": str(XSD.boolean),
+                    "Integer": str(XSD.integer),
+                    "Real": str(XSD.double),
+                    "Date": str(XSD.date),
+                    "DateTime": str(XSD.dateTime),
+                    "Time": str(XSD.time),
+                    "URI": str(XSD.anyURI),
+                }
+                canonical = primitive_map.get(primitive_name, str(XSD.string))
+                return (canonical, True)
+
+            nested_type_id = _attr(type_child, "type")
+            if nested_type_id and nested_type_id in classifier_uri_by_id:
+                return (str(classifier_uri_by_id[nested_type_id]), False)
+
+        return (str(XSD.string), True)
+
+    def _parse_literal_value(el: ET.Element) -> str | None:
+        value = _attr(el, "value")
+        return value if value != "" else None
+
+    def _parse_multiplicity_bounds(prop_el: ET.Element) -> tuple[str | None, str | None]:
+        lower = None
+        upper = None
+
+        lower_el = _find_first_direct_child(prop_el, "lowerValue")
+        upper_el = _find_first_direct_child(prop_el, "upperValue")
+
+        if lower_el is not None:
+            lower = _parse_literal_value(lower_el)
+        if upper_el is not None:
+            upper = _parse_literal_value(upper_el)
+
+        return lower, upper
+
+    def _compose_multiplicity(lower: str | None, upper: str | None) -> str:
+        lower = _norm_text(lower)
+        upper = _norm_text(upper)
+
+        if not lower and not upper:
+            return ""
+        if lower and not upper:
+            return lower
+        if upper and not lower:
+            return upper
+        if lower == upper:
+            return lower or ""
+        return f"{lower}..{upper}"
+
+    def _new_or_default_graph(package_name: str) -> Graph:
+        g = _new_graph(user, package_name)
+        onto = next(g.subjects(RDF.type, OWL.Ontology), None)
+        if isinstance(onto, URIRef):
+            _set_literal(g, onto, RDFS.label, package_name, lang="fr")
+        return g
+
+    raw_xmi = (
+        _norm_text(model.get("xmi_raw"))
+        or _norm_text(model.get("xmi_xml"))
+        or ""
+    )
+
+    if not raw_xmi:
+        xmi = _xmi_view(model)
+        elements = xmi.get("elements", [])
+        connectors = xmi.get("connectors", [])
+
+        package_name = (
+            _norm_text(name)
+            or _norm_text(model.get("name"))
+            or next(
+                (
+                    _norm_text(el.get("name"))
+                    for el in elements
+                    if _norm_text(el.get("type")) == "uml:Package" and _norm_text(el.get("name"))
+                ),
+                None,
+            )
+            or "Generated"
+        )
+
+        g = _new_graph(user, package_name)
+        onto = next(g.subjects(RDF.type, OWL.Ontology), None)
+        if isinstance(onto, URIRef):
+            _set_literal(g, onto, RDFS.label, package_name, lang="fr")
+
+        class_uri_by_id: dict[str, URIRef] = {}
+        class_uri_by_name: dict[str, URIRef] = {}
+
+        def ensure_class(uri: URIRef, label: str = "", eaid_value: str = "") -> URIRef:
+            g.add((uri, RDF.type, OWL.Class))
+            if label:
+                _set_literal(g, uri, RDFS.label, label, lang="fr")
+            if eaid_value:
+                _set_literal(g, uri, UML_META.eaid, eaid_value)
+            return uri
+
+        for el in elements:
+            el_type = _norm_text(el.get("type")) or ""
+            if el_type not in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+                continue
+
+            class_uri = _class_uri_from_element(el)
+            class_name = _safe_xmi_value(el.get("name"))
+            class_id = _safe_xmi_value(el.get("ID"))
+
+            label = _first_tag_value(el.get("tags", []), "label-en") or class_name
+            definition = _first_tag_value(el.get("tags", []), "definition-en")
+            usage_note = _first_tag_value(el.get("tags", []), "usageNote-en")
+
+            ensure_class(class_uri, label=label or class_name, eaid_value=class_id)
+            _set_literal(g, class_uri, RDFS.comment, definition, lang="fr")
+            _set_literal(g, class_uri, SKOS.scopeNote, usage_note, lang="fr")
+
+            if class_id:
+                class_uri_by_id[class_id] = class_uri
+            if class_name:
+                class_uri_by_name[_canonical_text(class_name)] = class_uri
+            if label:
+                class_uri_by_name[_canonical_text(label)] = class_uri
+
+        for el in elements:
+            el_type = _norm_text(el.get("type")) or ""
+            if el_type not in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+                continue
+
+            owner_uri = _class_uri_from_element(el)
+
+            for attr in el.get("attributes", []) or []:
+                prop_uri = _attribute_uri(owner_uri, attr)
+                attr_name = _safe_xmi_value(attr.get("name"))
+                attr_label = _first_tag_value(attr.get("tags_attribute", []), "label-en") or attr_name
+                attr_definition = _first_tag_value(attr.get("tags_attribute", []), "definition-en")
+                attr_usage = _first_tag_value(attr.get("tags_attribute", []), "usageNote-en")
+                attr_type = _norm_text(attr.get("type")) or ""
+
+                canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+
+                g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
+                g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
+                g.add(
+                    (prop_uri, RDF.type, OWL.DatatypeProperty if is_primitive else OWL.ObjectProperty)
+                )
+
+                _set_literal(g, prop_uri, RDFS.label, attr_label, lang="fr")
+                _set_literal(g, prop_uri, RDFS.comment, attr_definition, lang="fr")
+                _set_literal(g, prop_uri, SKOS.scopeNote, attr_usage, lang="fr")
+                _add_uri(g, prop_uri, RDFS.domain, owner_uri)
+
+                if canonical_range_uri:
+                    if is_primitive:
+                        _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
+                    else:
+                        target_uri = (
+                            class_uri_by_id.get(canonical_range_uri)
+                            or class_uri_by_name.get(_canonical_text(canonical_range_uri))
+                        )
+
+                        if target_uri is None:
+                            if "://" in canonical_range_uri or canonical_range_uri.startswith("urn:"):
+                                target_uri = URIRef(canonical_range_uri)
+                            else:
+                                target_uri = URIRef(f"urn:class:{_slugify_uri(canonical_range_uri)}")
+                            ensure_class(target_uri, label=attr_type or canonical_range_uri)
+
+                        _add_uri(g, prop_uri, RDFS.range, target_uri)
+
+        for conn in connectors:
+            relationship = _norm_text(conn.get("relationship")) or "Association"
+
+            source_uri = _resolve_class_uri_from_ref(
+                ref_id=_safe_xmi_value(conn.get("source_id")),
+                ref_name=_safe_xmi_value(conn.get("source_name")),
+                class_uri_by_id=class_uri_by_id,
+                class_uri_by_name=class_uri_by_name,
+            )
+            target_uri = _resolve_class_uri_from_ref(
+                ref_id=_safe_xmi_value(conn.get("target_id")),
+                ref_name=_safe_xmi_value(conn.get("target_name")),
+                class_uri_by_id=class_uri_by_id,
+                class_uri_by_name=class_uri_by_name,
+            )
+
+            if source_uri is None or target_uri is None:
+                continue
+
+            ensure_class(
+                source_uri,
+                label=_safe_xmi_value(conn.get("source_name")) or local_name(source_uri),
+                eaid_value=_safe_xmi_value(conn.get("source_id")),
+            )
+            ensure_class(
+                target_uri,
+                label=_safe_xmi_value(conn.get("target_name")) or local_name(target_uri),
+                eaid_value=_safe_xmi_value(conn.get("target_id")),
+            )
+
+            if relationship == "Generalization":
+                g.add((source_uri, RDFS.subClassOf, target_uri))
+                continue
+
+            semantic_uri = _semantic_uri_from_connector_view(conn)
+            if not semantic_uri:
+                semantic_uri = f"urn:relation:{_slugify_uri(_safe_xmi_value(conn.get('name')) or 'relation')}"
+
+            prop_uri = URIRef(semantic_uri)
+            rel_label = (
+                _norm_text(conn.get("name"))
+                or _first_tag_value(conn.get("tags_target", []), "label-en")
+                or _first_tag_value(conn.get("tags", []), "label-en")
+                or local_name(prop_uri)
+            )
+            rel_definition = (
+                _first_tag_value(conn.get("tags_target", []), "definition-en")
+                or _first_tag_value(conn.get("tags", []), "definition-en")
+            )
+            rel_usage = (
+                _first_tag_value(conn.get("tags_target", []), "usageNote-en")
+                or _first_tag_value(conn.get("tags", []), "usageNote-en")
+            )
+
+            g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
+            g.add((prop_uri, RDF.type, OWL.ObjectProperty))
+
+            _set_literal(g, prop_uri, RDFS.label, rel_label, lang="fr")
+            _set_literal(g, prop_uri, RDFS.comment, rel_definition, lang="fr")
+            _set_literal(g, prop_uri, SKOS.scopeNote, rel_usage, lang="fr")
+            _add_uri(g, prop_uri, RDFS.domain, source_uri)
+            _add_uri(g, prop_uri, RDFS.range, target_uri)
+
+            _set_literal(g, prop_uri, UML_META.relationshipType, relationship)
+
+            _set_literal_if_absent(g, prop_uri, UML_META.leftMultiplicity, _safe_xmi_value(conn.get("lb")))
+            _set_literal_if_absent(g, prop_uri, UML_META.rightMultiplicity, _safe_xmi_value(conn.get("rb")))
+            _set_literal_if_absent(g, prop_uri, UML_META.leftRole, _safe_xmi_value(conn.get("lt")))
+            _set_literal_if_absent(g, prop_uri, UML_META.rightRole, _safe_xmi_value(conn.get("rt")))
+
+        return g
+
+    try:
+        root = ET.fromstring(raw_xmi.encode("utf-8") if isinstance(raw_xmi, str) else raw_xmi)
+    except Exception:
+        return _new_graph(user, name or _norm_text(model.get("name")) or "Generated")
+
+    uml_model = None
+    for child in root.iter():
+        if _local(child.tag) == "Model":
+            uml_model = child
+            break
 
     package_name = (
         _norm_text(name)
         or _norm_text(model.get("name"))
-        or next(
-            (
-                _norm_text(el.get("name"))
-                for el in elements
-                if _norm_text(el.get("type")) == "uml:Package" and _norm_text(el.get("name"))
-            ),
-            None,
-        )
+        or (uml_model is not None and _attr(uml_model, "name"))
         or "Generated"
     )
 
-    g = _new_graph(user, package_name)
-    onto = next(g.subjects(RDF.type, OWL.Ontology), None)
-    if isinstance(onto, URIRef):
-        _set_literal(g, onto, RDFS.label, package_name, lang="fr")
+    g = _new_or_default_graph(package_name)
 
-    class_uri_by_id: dict[str, URIRef] = {}
-    class_uri_by_name: dict[str, URIRef] = {}
+    classifier_uri_by_id: dict[str, URIRef] = {}
+    classifier_name_by_id: dict[str, str] = {}
+    association_end_by_id: dict[str, ET.Element] = {}
+    pending_attributes: list[tuple[URIRef, ET.Element]] = []
+    pending_associations: list[ET.Element] = []
+    pending_generalizations: list[tuple[URIRef, ET.Element]] = []
 
-    def ensure_class(uri: URIRef, label: str = "", eaid_value: str = "") -> URIRef:
-        g.add((uri, RDF.type, OWL.Class))
-        if label:
-            _set_literal(g, uri, RDFS.label, label, lang="fr")
-        if eaid_value:
-            _set_literal(g, uri, UML_META.eaid, eaid_value)
-        return uri
-
-    for el in elements:
-        el_type = _norm_text(el.get("type")) or ""
-        if el_type not in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+    for el in root.iter():
+        if _local(el.tag) != "packagedElement":
             continue
 
-        class_uri = _class_uri_from_element(el)
-        class_name = _safe_xmi_value(el.get("name"))
-        class_id = _safe_xmi_value(el.get("ID"))
+        xmi_type = _xmi_attr(el, "type")
+        xmi_id = _xmi_attr(el, "id")
+        xmi_name = _attr(el, "name")
 
-        label = _first_tag_value(el.get("tags", []), "label-en") or class_name
-        definition = _first_tag_value(el.get("tags", []), "definition-en")
-        usage_note = _first_tag_value(el.get("tags", []), "usageNote-en")
-
-        ensure_class(class_uri, label=label or class_name, eaid_value=class_id)
-        _set_literal(g, class_uri, RDFS.comment, definition, lang="fr")
-        _set_literal(g, class_uri, SKOS.scopeNote, usage_note, lang="fr")
-
-        if class_id:
-            class_uri_by_id[class_id] = class_uri
-        if class_name:
-            class_uri_by_name[_canonical_text(class_name)] = class_uri
-        if label:
-            class_uri_by_name[_canonical_text(label)] = class_uri
-
-    for el in elements:
-        el_type = _norm_text(el.get("type")) or ""
-        if el_type not in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+        if xmi_type not in {"uml:Class", "uml:DataType", "uml:Enumeration", "uml:Association", "uml:Package"}:
             continue
 
-        owner_uri = _class_uri_from_element(el)
+        if xmi_type == "uml:Package":
+            continue
 
-        for attr in el.get("attributes", []) or []:
-            prop_uri = _attribute_uri(owner_uri, attr)
-            attr_name = _safe_xmi_value(attr.get("name"))
-            attr_label = _first_tag_value(attr.get("tags_attribute", []), "label-en") or attr_name
-            attr_definition = _first_tag_value(attr.get("tags_attribute", []), "definition-en")
-            attr_usage = _first_tag_value(attr.get("tags_attribute", []), "usageNote-en")
-            attr_type = _norm_text(attr.get("type")) or ""
+        if xmi_type in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+            class_uri = _classifier_uri_from_xml(el)
+            meta = _parse_semantic_comment(_comment_body(el))
 
-            canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+            label = meta.get("label") or xmi_name or local_name(class_uri)
+            definition = meta.get("definition")
+            usage_note = meta.get("usage_note")
 
-            g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
-            g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
-            g.add(
-                (prop_uri, RDF.type, OWL.DatatypeProperty if is_primitive else OWL.ObjectProperty)
-            )
+            g.add((class_uri, RDF.type, OWL.Class))
+            _set_literal(g, class_uri, RDFS.label, label, lang="fr")
+            _set_literal(g, class_uri, RDFS.comment, definition, lang="fr")
+            _set_literal(g, class_uri, SKOS.scopeNote, usage_note, lang="fr")
+            if xmi_id:
+                _set_literal(g, class_uri, UML_META.eaid, xmi_id)
+                classifier_uri_by_id[xmi_id] = class_uri
+                classifier_name_by_id[xmi_id] = label
 
-            _set_literal(g, prop_uri, RDFS.label, attr_label, lang="fr")
-            _set_literal(g, prop_uri, RDFS.comment, attr_definition, lang="fr")
-            _set_literal(g, prop_uri, SKOS.scopeNote, attr_usage, lang="fr")
-            _add_uri(g, prop_uri, RDFS.domain, owner_uri)
+            for child in _find_direct_children(el, "ownedAttribute"):
+                pending_attributes.append((class_uri, child))
 
-            if canonical_range_uri:
-                if is_primitive:
-                    _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
-                else:
-                    target_uri = (
-                        class_uri_by_id.get(canonical_range_uri)
-                        or class_uri_by_name.get(_canonical_text(canonical_range_uri))
-                    )
+            for child in _find_direct_children(el, "generalization"):
+                pending_generalizations.append((class_uri, child))
 
-                    if target_uri is None:
-                        if "://" in canonical_range_uri or canonical_range_uri.startswith("urn:"):
-                            target_uri = URIRef(canonical_range_uri)
-                        else:
-                            target_uri = URIRef(f"urn:class:{_slugify_uri(canonical_range_uri)}")
-                        ensure_class(target_uri, label=attr_type or canonical_range_uri)
+            if xmi_type == "uml:Enumeration":
+                for lit in _find_direct_children(el, "ownedLiteral"):
+                    lit_name = _attr(lit, "name")
+                    if not lit_name:
+                        continue
+                    enum_prop_uri = URIRef(f"{str(class_uri)}#{_slugify_uri(lit_name)}")
+                    g.add((enum_prop_uri, RDF.type, OWL.DatatypeProperty))
+                    _set_literal(g, enum_prop_uri, RDFS.label, lit_name, lang="fr")
+                    _add_uri(g, enum_prop_uri, RDFS.domain, class_uri)
+                    _set_uri(g, enum_prop_uri, RDFS.range, XSD.string)
 
-                    _add_uri(g, prop_uri, RDFS.range, target_uri)
+        elif xmi_type == "uml:Association":
+            pending_associations.append(el)
+            for end_el in _find_direct_children(el, "ownedEnd"):
+                end_id = _xmi_attr(end_el, "id")
+                if end_id:
+                    association_end_by_id[end_id] = end_el
 
-    for conn in connectors:
-        relationship = _norm_text(conn.get("relationship")) or "Association"
+    for owner_uri, prop_el in pending_attributes:
+        prop_uri = _property_uri_from_xml(owner_uri, prop_el)
+        meta = _parse_semantic_comment(_comment_body(prop_el))
+        prop_name = _attr(prop_el, "name") or local_name(prop_uri)
 
-        source_uri = _resolve_class_uri_from_ref(
-            ref_id=_safe_xmi_value(conn.get("source_id")),
-            ref_name=_safe_xmi_value(conn.get("source_name")),
-            class_uri_by_id=class_uri_by_id,
-            class_uri_by_name=class_uri_by_name,
-        )
-        target_uri = _resolve_class_uri_from_ref(
-            ref_id=_safe_xmi_value(conn.get("target_id")),
-            ref_name=_safe_xmi_value(conn.get("target_name")),
-            class_uri_by_id=class_uri_by_id,
-            class_uri_by_name=class_uri_by_name,
-        )
+        prop_label = meta.get("label") or prop_name
+        prop_definition = meta.get("definition")
+        prop_usage = meta.get("usage_note")
+
+        range_uri, is_primitive = _resolve_type_from_owned_attribute(prop_el, classifier_uri_by_id)
+
+        g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
+        g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
+        g.add((prop_uri, RDF.type, OWL.DatatypeProperty if is_primitive else OWL.ObjectProperty))
+
+        _set_literal(g, prop_uri, RDFS.label, prop_label, lang="fr")
+        _set_literal(g, prop_uri, RDFS.comment, prop_definition, lang="fr")
+        _set_literal(g, prop_uri, SKOS.scopeNote, prop_usage, lang="fr")
+        _add_uri(g, prop_uri, RDFS.domain, owner_uri)
+
+        if range_uri:
+            _set_uri(g, prop_uri, RDFS.range, range_uri)
+
+    for source_uri, gen_el in pending_generalizations:
+        target_id = _attr(gen_el, "general")
+        target_uri = classifier_uri_by_id.get(target_id)
+        if target_uri is not None:
+            g.add((source_uri, RDFS.subClassOf, target_uri))
+
+    for assoc_el in pending_associations:
+        assoc_meta = _parse_semantic_comment(_comment_body(assoc_el))
+        assoc_name = _attr(assoc_el, "name")
+
+        ends = _find_direct_children(assoc_el, "ownedEnd")
+        if len(ends) < 2:
+            member_end_refs = [tok for tok in _attr(assoc_el, "memberEnd").split() if tok]
+            resolved_ends: list[ET.Element] = []
+            for ref in member_end_refs:
+                end_el = association_end_by_id.get(ref)
+                if end_el is not None:
+                    resolved_ends.append(end_el)
+            ends = resolved_ends
+
+        if len(ends) < 2:
+            continue
+
+        source_end = ends[0]
+        target_end = ends[1]
+
+        source_id = _attr(source_end, "type")
+        target_id = _attr(target_end, "type")
+        source_uri = classifier_uri_by_id.get(source_id)
+        target_uri = classifier_uri_by_id.get(target_id)
 
         if source_uri is None or target_uri is None:
             continue
 
-        ensure_class(
-            source_uri,
-            label=_safe_xmi_value(conn.get("source_name")) or local_name(source_uri),
-            eaid_value=_safe_xmi_value(conn.get("source_id")),
+        semantic_uri = (
+            _norm_text(assoc_meta.get("uri"))
+            or f"urn:relation:{_slugify_uri(assoc_name or 'relation')}"
         )
-        ensure_class(
-            target_uri,
-            label=_safe_xmi_value(conn.get("target_name")) or local_name(target_uri),
-            eaid_value=_safe_xmi_value(conn.get("target_id")),
-        )
-
-        if relationship == "Generalization":
-            g.add((source_uri, RDFS.subClassOf, target_uri))
-            continue
-
-        semantic_uri = _semantic_uri_from_connector_view(conn)
-        if not semantic_uri:
-            semantic_uri = f"urn:relation:{
-                _slugify_uri(_safe_xmi_value(conn.get('name')) or 'relation')
-            }"
-
         prop_uri = URIRef(semantic_uri)
-        rel_label = (
-            _norm_text(conn.get("name"))
-            or _first_tag_value(conn.get("tags_target", []), "label-en")
-            or _first_tag_value(conn.get("tags", []), "label-en")
-            or local_name(prop_uri)
-        )
-        rel_definition = (
-            _first_tag_value(conn.get("tags_target", []), "definition-en")
-            or _first_tag_value(conn.get("tags", []), "definition-en")
-        )
-        rel_usage = (
-            _first_tag_value(conn.get("tags_target", []), "usageNote-en")
-            or _first_tag_value(conn.get("tags", []), "usageNote-en")
-        )
+
+        rel_label = assoc_meta.get("label") or assoc_name or local_name(prop_uri)
+        rel_definition = assoc_meta.get("definition")
+        rel_usage = assoc_meta.get("usage_note")
 
         g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
         g.add((prop_uri, RDF.type, OWL.ObjectProperty))
@@ -943,20 +1265,27 @@ def build_graph_from_xmi_model(
         _add_uri(g, prop_uri, RDFS.domain, source_uri)
         _add_uri(g, prop_uri, RDFS.range, target_uri)
 
+        relationship = "Association"
+        target_aggregation = _attr(target_end, "aggregation")
+        source_aggregation = _attr(source_end, "aggregation")
+
+        aggregation_value = target_aggregation or source_aggregation
+        if aggregation_value == "shared":
+            relationship = "Aggregation"
+        elif aggregation_value == "composite":
+            relationship = "Composition"
+
         _set_literal(g, prop_uri, UML_META.relationshipType, relationship)
 
-        _set_literal_if_absent(
-            g, prop_uri, UML_META.leftMultiplicity, _safe_xmi_value(conn.get("lb"))
-        )
-        _set_literal_if_absent(
-            g, prop_uri, UML_META.rightMultiplicity, _safe_xmi_value(conn.get("rb"))
-        )
-        _set_literal_if_absent(
-            g, prop_uri, UML_META.leftRole, _safe_xmi_value(conn.get("lt"))
-        )
-        _set_literal_if_absent(
-            g, prop_uri, UML_META.rightRole, _safe_xmi_value(conn.get("rt"))
-        )
+        lb = _compose_multiplicity(*_parse_multiplicity_bounds(source_end))
+        rb = _compose_multiplicity(*_parse_multiplicity_bounds(target_end))
+        lt = _attr(source_end, "name")
+        rt = _attr(target_end, "name")
+
+        _set_literal_if_absent(g, prop_uri, UML_META.leftMultiplicity, lb)
+        _set_literal_if_absent(g, prop_uri, UML_META.rightMultiplicity, rb)
+        _set_literal_if_absent(g, prop_uri, UML_META.leftRole, lt)
+        _set_literal_if_absent(g, prop_uri, UML_META.rightRole, rt)
 
     return g
 
@@ -1457,63 +1786,152 @@ def _remove_none_deep(value: Any) -> Any:
 
 def build_xmi_bytes(model: dict[str, Any]) -> bytes:
     xmi = _remove_none_deep(model.get("xmi", {}))
-    elements = xmi.get("elements", [])
-    connectors = xmi.get("connectors", [])
+    elements = xmi.get("elements", []) or []
+    connectors = xmi.get("connectors", []) or []
 
-    NS_XMI = "http://www.omg.org/spec/XMI/20131001"
-    NS_UML = "http://www.omg.org/spec/UML/20161101"
+    NS_XMI = "http://schema.omg.org/spec/XMI/2.1"
+    NS_UML = "http://schema.omg.org/spec/UML/2.1"
 
-    root = Element(
-        "xmi:XMI",
-        {
-            "xmlns:xmi": NS_XMI,
-            "xmlns:uml": NS_UML,
-            "xmi:version": "2.5.1",
-        },
-    )
+    from xml.etree.ElementTree import register_namespace
 
-    model_id = ea_id("MODEL", model.get("name") or "model")
-    uml_model = SubElement(
-        root,
-        "uml:Model",
-        {
-            "xmi:type": "uml:Model",
-            "xmi:id": model_id,
-            "name": _safe_xmi_value(model.get("name") or "model"),
-        },
-    )
+    register_namespace("xmi", NS_XMI)
+    register_namespace("uml", NS_UML)
 
-    root_package = None
-    class_elements: list[dict[str, Any]] = []
+    def qname(ns: str, tag: str) -> str:
+        return f"{{{ns}}}{tag}"
 
-    for el in elements:
-        if el.get("type") == "uml:Package" and root_package is None:
-            root_package = el
-        elif el.get("type") == "uml:Class":
-            class_elements.append(el)
+    def text(value: Any) -> str:
+        return _safe_xmi_value(value)
 
-    if root_package is None:
-        root_package = {
-            "ID": ea_id("EAPK", model.get("name") or "package"),
-            "name": _safe_xmi_value(model.get("name") or "Package"),
-            "type": "uml:Package",
-            "package": "",
-            "tags": [],
-        }
+    def first_tag_value(tags: list[dict[str, Any]] | None, key: str) -> str:
+        return _first_tag_value(tags, key)
 
-    package_el = SubElement(
-        uml_model,
-        "packagedElement",
-        {
-            "xmi:type": "uml:Package",
-            "xmi:id": _safe_xmi_value(root_package.get("ID")),
-            "name": _safe_xmi_value(root_package.get("name")),
-        },
-    )
+    def add_comment(parent: Element, body_text: str | None, seed: str) -> None:
+        body_text = _norm_text(body_text)
+        if not body_text:
+            return
+        owned_comment = SubElement(parent, "ownedComment")
+        owned_comment.set(qname(NS_XMI, "id"), ea_id("COMMENT", seed))
+        owned_comment.set(qname(NS_XMI, "type"), "uml:Comment")
+        body = SubElement(owned_comment, "body")
+        body.text = body_text
 
-    class_id_to_xml: dict[str, Element] = {}
+    def build_semantic_comment_from_tags(tags: list[dict[str, Any]] | None) -> str | None:
+        if not tags:
+            return None
 
-    def _parse_type_to_href(attr_type: str) -> str | None:
+        parts: list[str] = []
+
+        semantic_uri = first_tag_value(tags, "semantic_uri")
+        uri = first_tag_value(tags, "uri")
+        label = first_tag_value(tags, "label-en") or first_tag_value(tags, "label")
+        definition = first_tag_value(tags, "definition-en") or first_tag_value(tags, "definition")
+        usage_note = first_tag_value(tags, "usageNote-en") or first_tag_value(tags, "usageNote")
+        referenced = first_tag_value(tags, "referenced")
+        connector_id = first_tag_value(tags, "connector_id")
+
+        if semantic_uri:
+            parts.append(f"URI: {semantic_uri}")
+        elif uri:
+            parts.append(f"URI: {uri}")
+
+        if label:
+            parts.append(f"Label: {label}")
+        if definition:
+            parts.append(f"Definition: {definition}")
+        if usage_note:
+            parts.append(f"Usage note: {usage_note}")
+        if referenced:
+            parts.append(f"Referenced: {referenced}")
+        if connector_id:
+            parts.append(f"Connector ID: {connector_id}")
+
+        return "\n".join(parts) if parts else None
+
+    def _normalize_mult_token(token: str | None) -> str | None:
+        token = _norm_text(token)
+        if not token:
+            return None
+
+        t = token.strip().lower()
+
+        if t in {"n", "m", "many", "*"}:
+            return "*"
+
+        if t.isdigit():
+            return t
+
+        return token.strip()
+
+    def parse_multiplicity(raw: Any) -> tuple[str | None, str | None]:
+        raw = text(raw).strip()
+        if not raw:
+            return (None, None)
+
+        normalized = (
+            raw.replace(" ", "")
+            .replace("many", "*")
+            .replace("Many", "*")
+            .replace("MANY", "*")
+            .replace("N", "*")
+            .replace("n", "*")
+            .replace("M", "*")
+        )
+
+        if normalized == "*":
+            return ("0", "*")
+
+        if ".." in normalized:
+            lower, upper = normalized.split("..", 1)
+            lower = _normalize_mult_token(lower)
+            upper = _normalize_mult_token(upper)
+
+            if lower == "*":
+                lower = "0"
+            if upper == "*" and lower is None:
+                lower = "0"
+
+            return (lower, upper)
+
+        one = _normalize_mult_token(normalized)
+        if one == "*":
+            return ("0", "*")
+
+        return (one, one)
+
+    def normalize_bounds(lower_raw: Any, upper_raw: Any) -> tuple[str | None, str | None]:
+        lower = _normalize_mult_token(_norm_text(lower_raw))
+        upper = _normalize_mult_token(_norm_text(upper_raw))
+
+        if lower == "*":
+            lower = "0"
+        if upper == "*" and lower is None:
+            lower = "0"
+
+        return (lower, upper)
+
+    def add_lower_upper(owner: Element, lower: str | None, upper: str | None, seed: str) -> None:
+        if lower is not None:
+            safe_lower = "0" if lower == "*" else lower
+            if safe_lower.isdigit():
+                lower_value = SubElement(owner, "lowerValue")
+                lower_value.set(qname(NS_XMI, "type"), "uml:LiteralInteger")
+                lower_value.set(qname(NS_XMI, "id"), ea_id("LOW", f"{seed}:lower"))
+                lower_value.set("value", safe_lower)
+
+        if upper is not None:
+            if upper == "*":
+                upper_value = SubElement(owner, "upperValue")
+                upper_value.set(qname(NS_XMI, "type"), "uml:LiteralUnlimitedNatural")
+                upper_value.set(qname(NS_XMI, "id"), ea_id("UP", f"{seed}:upper"))
+                upper_value.set("value", "*")
+            elif upper.isdigit():
+                upper_value = SubElement(owner, "upperValue")
+                upper_value.set(qname(NS_XMI, "type"), "uml:LiteralInteger")
+                upper_value.set(qname(NS_XMI, "id"), ea_id("UP", f"{seed}:upper"))
+                upper_value.set("value", upper)
+
+    def primitive_href(attr_type: str) -> str | None:
         primitive_map = {
             "String": "String",
             "Boolean": "Boolean",
@@ -1522,198 +1940,337 @@ def build_xmi_bytes(model: dict[str, Any]) -> bytes:
             "Date": "Date",
             "DateTime": "DateTime",
             "Time": "Time",
-            "URI": "UnlimitedNatural",
+            "URI": "String",
         }
-        t = _safe_xmi_value(attr_type)
+        t = text(attr_type)
         if not t:
             return None
-        return primitive_map.get(t)
+        mapped = primitive_map.get(t)
+        if not mapped:
+            return None
+        return f"http://www.omg.org/spec/UML/20131001/PrimitiveTypes.xmi#{mapped}"
 
-    for cls in class_elements:
-        cls_id = _safe_xmi_value(cls.get("ID"))
-        cls_name = _safe_xmi_value(cls.get("name"))
+    def is_connector_shadow_attribute(attr: dict[str, Any] | None) -> bool:
+        if not isinstance(attr, dict):
+            return False
 
-        cls_el = SubElement(
-            package_el,
-            "packagedElement",
-            {
-                "xmi:type": "uml:Class",
-                "xmi:id": cls_id,
-                "name": cls_name,
-                "visibility": "public",
-            },
+        attr_id = text(attr.get("ID"))
+        if attr_id.startswith("CONN_"):
+            return True
+
+        tags = attr.get("tags_attribute", []) or []
+        if first_tag_value(tags, "connector_id"):
+            return True
+        if first_tag_value(tags, "semantic_uri"):
+            return True
+
+        uri = first_tag_value(tags, "uri")
+        if uri and (uri.startswith("http://") or uri.startswith("https://") or uri.startswith("urn:")):
+            for conn in connectors:
+                conn_semantic_uri = _semantic_uri_from_connector_view(conn)
+                if conn_semantic_uri and conn_semantic_uri == uri:
+                    return True
+
+        return False
+
+    def connector_comment_from_conn(conn: dict[str, Any]) -> str | None:
+        merged_rel_tags = (
+            (conn.get("tags_target") or [])
+            + (conn.get("tags_source") or [])
+            + (conn.get("tags") or [])
         )
-        class_id_to_xml[cls_id] = cls_el
 
-        for attr in cls.get("attributes", []):
-            attr_name = _safe_xmi_value(attr.get("name"))
-            attr_type = _safe_xmi_value(attr.get("type"))
-            attr_id = ea_id("ATTR", f"{cls_id}:{attr_name}")
+        rel_comment = build_semantic_comment_from_tags(merged_rel_tags)
+        if rel_comment:
+            return rel_comment
 
-            attr_attribs = {
-                "xmi:type": "uml:Property",
-                "xmi:id": attr_id,
-                "name": attr_name,
-                "visibility": "public",
-            }
+        semantic_uri = _semantic_uri_from_connector_view(conn)
+        rel_name = text(conn.get("name"))
+        rel_definition = (
+            first_tag_value(merged_rel_tags, "definition-en")
+            or first_tag_value(merged_rel_tags, "definition")
+        )
+        rel_usage = (
+            first_tag_value(merged_rel_tags, "usageNote-en")
+            or first_tag_value(merged_rel_tags, "usageNote")
+        )
 
-            href_type = _parse_type_to_href(attr_type)
-            if href_type:
-                attr_attribs["type"] = href_type
+        rel_parts = []
+        if semantic_uri:
+            rel_parts.append(f"URI: {semantic_uri}")
+        if rel_name:
+            rel_parts.append(f"Label: {rel_name}")
+        if rel_definition:
+            rel_parts.append(f"Definition: {rel_definition}")
+        if rel_usage:
+            rel_parts.append(f"Usage note: {rel_usage}")
 
-            owned_attr = SubElement(cls_el, "ownedAttribute", attr_attribs)
+        connector_id = _connector_id_from_view(conn)
+        if connector_id:
+            rel_parts.insert(0, f"Connector ID: {connector_id}")
 
-            lower = _safe_xmi_value(attr.get("lower_bounds"))
-            upper = _safe_xmi_value(attr.get("upper_bounds"))
+        return "\n".join(rel_parts) if rel_parts else None
 
-            if lower:
-                SubElement(
+    root = Element(qname(NS_XMI, "XMI"))
+    root.set(qname(NS_XMI, "version"), "2.1")
+
+    documentation = SubElement(root, qname(NS_XMI, "Documentation"))
+    documentation.set("exporter", "AI4Semantics")
+    documentation.set("exporterVersion", "2.1")
+
+    model_name = text(model.get("name") or "model")
+    model_id = ea_id("MODEL", model_name or "model")
+
+    uml_model = SubElement(root, qname(NS_UML, "Model"))
+    uml_model.set(qname(NS_XMI, "id"), model_id)
+    uml_model.set(qname(NS_XMI, "type"), "uml:Model")
+    uml_model.set("name", model_name or "model")
+    uml_model.set("visibility", "public")
+
+    element_by_id: dict[str, dict[str, Any]] = {}
+    element_xml_by_id: dict[str, Element] = {}
+    package_ids: set[str] = set()
+    classifier_ids_by_name: dict[str, str] = {}
+    classifier_ids_by_canonical_name: dict[str, str] = {}
+    classifier_ids_by_uri: dict[str, str] = {}
+
+    for el in elements:
+        el_id = text(el.get("ID"))
+        el_type = text(el.get("type"))
+        if not el_id:
+            continue
+
+        element_by_id[el_id] = el
+
+        if el_type == "uml:Package":
+            package_ids.add(el_id)
+
+        if el_type in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+            el_name = text(el.get("name"))
+            if el_name:
+                classifier_ids_by_name[el_name] = el_id
+                classifier_ids_by_canonical_name[_canonical_text(el_name)] = el_id
+
+            uri = first_tag_value(el.get("tags", []), "uri")
+            if uri:
+                classifier_ids_by_uri[uri] = el_id
+
+    def resolve_parent_container(el: dict[str, Any]) -> Element:
+        parent_id = text(el.get("package"))
+        if parent_id and parent_id in package_ids and parent_id in element_xml_by_id:
+            return element_xml_by_id[parent_id]
+        return uml_model
+
+    def create_package(el: dict[str, Any], parent_xml: Element) -> Element:
+        el_id = text(el.get("ID"))
+        pkg_el = SubElement(parent_xml, "packagedElement")
+        pkg_el.set(qname(NS_XMI, "id"), el_id)
+        pkg_el.set(qname(NS_XMI, "type"), "uml:Package")
+        pkg_el.set("name", text(el.get("name")) or "Package")
+        pkg_el.set("visibility", "public")
+        element_xml_by_id[el_id] = pkg_el
+
+        add_comment(
+            pkg_el,
+            build_semantic_comment_from_tags(el.get("tags", [])),
+            f"{el_id}:comment",
+        )
+        return pkg_el
+
+    def create_classifier(el: dict[str, Any], parent_xml: Element) -> Element:
+        el_id = text(el.get("ID"))
+        el_type = text(el.get("type"))
+        cls_el = SubElement(parent_xml, "packagedElement")
+        cls_el.set(qname(NS_XMI, "id"), el_id)
+        cls_el.set(qname(NS_XMI, "type"), el_type)
+        cls_el.set("name", text(el.get("name")))
+        cls_el.set("visibility", "public")
+        element_xml_by_id[el_id] = cls_el
+
+        add_comment(
+            cls_el,
+            build_semantic_comment_from_tags(el.get("tags", [])),
+            f"{el_id}:comment",
+        )
+
+        if el_type in {"uml:Class", "uml:DataType"}:
+            for attr in el.get("attributes", []) or []:
+                if is_connector_shadow_attribute(attr):
+                    continue
+
+                attr_name = text(attr.get("name")) or "attribute"
+                attr_type = text(attr.get("type"))
+                attr_id = text(attr.get("ID")) or ea_id("ATTR", f"{el_id}:{attr_name}")
+
+                owned_attr = SubElement(cls_el, "ownedAttribute")
+                owned_attr.set(qname(NS_XMI, "id"), attr_id)
+                owned_attr.set(qname(NS_XMI, "type"), "uml:Property")
+                owned_attr.set("name", attr_name)
+                owned_attr.set("visibility", "public")
+
+                href = primitive_href(attr_type)
+                if href:
+                    type_el = SubElement(owned_attr, "type")
+                    type_el.set(qname(NS_XMI, "type"), "uml:PrimitiveType")
+                    type_el.set("href", href)
+                else:
+                    target_id = (
+                        classifier_ids_by_name.get(attr_type)
+                        or classifier_ids_by_canonical_name.get(_canonical_text(attr_type))
+                        or classifier_ids_by_uri.get(attr_type)
+                    )
+                    if target_id:
+                        owned_attr.set("type", target_id)
+
+                lower, upper = normalize_bounds(
+                    attr.get("lower_bounds"),
+                    attr.get("upper_bounds"),
+                )
+                if lower is not None or upper is not None:
+                    add_lower_upper(owned_attr, lower, upper, attr_id)
+
+                add_comment(
                     owned_attr,
-                    "lowerValue",
-                    {
-                        "xmi:type": "uml:LiteralInteger",
-                        "xmi:id": ea_id("LOW", f"{attr_id}:lower"),
-                        "value": lower,
-                    },
+                    build_semantic_comment_from_tags(attr.get("tags_attribute", [])),
+                    f"{attr_id}:comment",
                 )
 
-            if upper:
-                SubElement(
-                    owned_attr,
-                    "upperValue",
-                    {
-                        "xmi:type": "uml:LiteralUnlimitedNatural",
-                        "xmi:id": ea_id("UP", f"{attr_id}:upper"),
-                        "value": upper,
-                    },
-                )
+        elif el_type == "uml:Enumeration":
+            categories = el.get("categories", []) or []
+            if not categories and el.get("attributes"):
+                categories = [
+                    text(a.get("name"))
+                    for a in (el.get("attributes") or [])
+                    if text(a.get("name"))
+                ]
 
-    def _add_multiplicity(end_el: Element, raw: str, seed: str) -> None:
-        raw = _safe_xmi_value(raw)
-        if not raw:
-            return
+            for i, literal_name in enumerate(categories, start=1):
+                lit = SubElement(cls_el, "ownedLiteral")
+                lit.set(qname(NS_XMI, "id"), ea_id("LIT", f"{el_id}:{i}:{literal_name}"))
+                lit.set(qname(NS_XMI, "type"), "uml:EnumerationLiteral")
+                lit.set("name", text(literal_name))
 
-        if ".." in raw:
-            lower, upper = raw.split("..", 1)
-        else:
-            lower, upper = raw, raw
+        return cls_el
 
-        lower = lower.strip()
-        upper = upper.strip()
+    unresolved = [el for el in elements if text(el.get("ID"))]
+    max_passes = max(3, len(unresolved) + 2)
+    pass_count = 0
 
-        if lower:
-            SubElement(
-                end_el,
-                "lowerValue",
-                {
-                    "xmi:type": "uml:LiteralInteger",
-                    "xmi:id": ea_id("LOW", f"{seed}:lower"),
-                    "value": lower if lower != "*" else "0",
-                },
-            )
+    while unresolved and pass_count < max_passes:
+        pass_count += 1
+        next_round: list[dict[str, Any]] = []
 
-        if upper:
-            SubElement(
-                end_el,
-                "upperValue",
-                {
-                    "xmi:type": "uml:LiteralUnlimitedNatural",
-                    "xmi:id": ea_id("UP", f"{seed}:upper"),
-                    "value": upper,
-                },
-            )
+        for el in unresolved:
+            el_type = text(el.get("type"))
+            parent_id = text(el.get("package"))
+
+            if parent_id and parent_id in package_ids and parent_id not in element_xml_by_id:
+                next_round.append(el)
+                continue
+
+            parent_xml = resolve_parent_container(el)
+
+            if el_type == "uml:Package":
+                create_package(el, parent_xml)
+            elif el_type in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+                create_classifier(el, parent_xml)
+
+        if len(next_round) == len(unresolved):
+            for el in next_round:
+                el_type = text(el.get("type"))
+                if el_type == "uml:Package":
+                    create_package(el, uml_model)
+                elif el_type in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
+                    create_classifier(el, uml_model)
+            break
+
+        unresolved = next_round
 
     for conn in connectors:
-        relationship = _safe_xmi_value(conn.get("relationship"))
-        source_id = _safe_xmi_value(conn.get("source_id"))
-        target_id = _safe_xmi_value(conn.get("target_id"))
-        rel_name = _safe_xmi_value(conn.get("name"))
-        connector_id = _connector_id_from_view(conn) or ea_id(
-            "CONN",
-            f"{source_id}:{target_id}:{rel_name}:{relationship}",
-        )
+        relationship = text(conn.get("relationship")) or "Association"
+        relationship_lower = relationship.lower()
+
+        source_id = text(conn.get("source_id"))
+        target_id = text(conn.get("target_id"))
+
+        if not source_id and text(conn.get("source_name")):
+            source_id = (
+                classifier_ids_by_name.get(text(conn.get("source_name")))
+                or classifier_ids_by_canonical_name.get(_canonical_text(text(conn.get("source_name"))))
+                or ""
+            )
+
+        if not target_id and text(conn.get("target_name")):
+            target_id = (
+                classifier_ids_by_name.get(text(conn.get("target_name")))
+                or classifier_ids_by_canonical_name.get(_canonical_text(text(conn.get("target_name"))))
+                or ""
+            )
 
         if not source_id or not target_id:
             continue
 
-        if relationship == "Generalization":
-            source_cls = class_id_to_xml.get(source_id)
+        connector_id = _connector_id_from_view(conn) or ea_id(
+            "CONN",
+            f"{source_id}:{target_id}:{text(conn.get('name'))}:{relationship}",
+        )
+
+        if relationship_lower == "generalization":
+            source_cls = element_xml_by_id.get(source_id)
             if source_cls is None:
                 continue
 
-            SubElement(
-                source_cls,
-                "generalization",
-                {
-                    "xmi:type": "uml:Generalization",
-                    "xmi:id": connector_id,
-                    "general": target_id,
-                },
-            )
+            gen = SubElement(source_cls, "generalization")
+            gen.set(qname(NS_XMI, "id"), connector_id)
+            gen.set(qname(NS_XMI, "type"), "uml:Generalization")
+            gen.set("general", target_id)
+
+            add_comment(gen, connector_comment_from_conn(conn), f"{connector_id}:comment")
             continue
 
-        assoc_id = connector_id
-        end1_id = ea_id("END", f"{assoc_id}:source")
-        end2_id = ea_id("END", f"{assoc_id}:target")
+        source_el = element_by_id.get(source_id, {})
+        assoc_parent = resolve_parent_container(source_el) if source_el else uml_model
 
-        assoc_el = SubElement(
-            package_el,
-            "packagedElement",
-            {
-                "xmi:type": "uml:Association",
-                "xmi:id": assoc_id,
-                "name": rel_name,
-                "visibility": "public",
-                "memberEnd": f"{end1_id} {end2_id}",
-            },
-        )
+        assoc = SubElement(assoc_parent, "packagedElement")
+        assoc.set(qname(NS_XMI, "id"), connector_id)
+        assoc.set(qname(NS_XMI, "type"), "uml:Association")
+        assoc.set("name", text(conn.get("name")))
+        assoc.set("visibility", "public")
 
-        end1_attrs = {
-            "xmi:type": "uml:Property",
-            "xmi:id": end1_id,
-            "name": _safe_xmi_value(conn.get("lt")) or "",
-            "type": source_id,
-            "association": assoc_id,
-        }
-        end2_attrs = {
-            "xmi:type": "uml:Property",
-            "xmi:id": end2_id,
-            "name": _safe_xmi_value(conn.get("rt")) or "",
-            "type": target_id,
-            "association": assoc_id,
-        }
+        end1_id = ea_id("END", f"{connector_id}:source")
+        end2_id = ea_id("END", f"{connector_id}:target")
+        assoc.set("memberEnd", f"{end1_id} {end2_id}")
 
-        if relationship == "Aggregation":
-            end2_attrs["aggregation"] = "shared"
-        elif relationship == "Composition":
-            end2_attrs["aggregation"] = "composite"
+        source_end = SubElement(assoc, "ownedEnd")
+        source_end.set(qname(NS_XMI, "id"), end1_id)
+        source_end.set(qname(NS_XMI, "type"), "uml:Property")
+        source_end.set("type", source_id)
+        source_end.set("association", connector_id)
+        if text(conn.get("lt")):
+            source_end.set("name", text(conn.get("lt")))
 
-        end1 = SubElement(assoc_el, "ownedEnd", end1_attrs)
-        end2 = SubElement(assoc_el, "ownedEnd", end2_attrs)
+        target_end = SubElement(assoc, "ownedEnd")
+        target_end.set(qname(NS_XMI, "id"), end2_id)
+        target_end.set(qname(NS_XMI, "type"), "uml:Property")
+        target_end.set("type", target_id)
+        target_end.set("association", connector_id)
+        if text(conn.get("rt")):
+            target_end.set("name", text(conn.get("rt")))
 
-        _add_multiplicity(end1, _safe_xmi_value(conn.get("lb")), end1_id)
-        _add_multiplicity(end2, _safe_xmi_value(conn.get("rb")), end2_id)
+        if relationship_lower == "aggregation":
+            target_end.set("aggregation", "shared")
+        elif relationship_lower == "composition":
+            target_end.set("aggregation", "composite")
+
+        lb_lower, lb_upper = parse_multiplicity(conn.get("lb"))
+        rb_lower, rb_upper = parse_multiplicity(conn.get("rb"))
+
+        add_lower_upper(source_end, lb_lower, lb_upper, end1_id)
+        add_lower_upper(target_end, rb_lower, rb_upper, end2_id)
+
+        add_comment(assoc, connector_comment_from_conn(conn), f"{connector_id}:comment")
 
     return tostring(root, encoding="utf-8", xml_declaration=True)
-
-
-def get_export_info(user: str = "", name: str = "", target_format: str = "") -> dict[str, str]:
-    model = get_model(user=user, name=name)
-    export_format = (_norm_text(target_format) or _default_source_format(model)).lower()
-    model_name = _sanitize_path_component(name, "model")
-
-    if export_format == "xmi":
-        return {
-            "source_format": export_format,
-            "filename": f"{model_name}.xmi",
-            "mimetype": "application/xml",
-        }
-
-    return {
-        "source_format": export_format,
-        "filename": f"{model_name}.ttl",
-        "mimetype": "text/turtle",
-    }
 
 
 def build_ttl_bytes(model: dict[str, Any], user: str = "", name: str = "") -> bytes:
