@@ -1,7 +1,11 @@
-from os import getenv
+from pathlib import Path
+from os import getenv, environ
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+environ["HF_HOME"] = str(PROJECT_ROOT / ".cache_hf")
+
 from typing import Any
 
-from pathlib import Path
 from yaml import safe_load
 from qdrant_client import QdrantClient
 from dotenv import load_dotenv
