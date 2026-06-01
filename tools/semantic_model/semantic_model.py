@@ -261,20 +261,80 @@ _FRIENDLY_TO_XSD_URI: dict[str, str] = {
 }
 
 
-def resolve_type_uri(attr_type: str | None) -> tuple[str, bool]:
-    attr_type = _norm_text(attr_type)
-    if not attr_type:
-        return (_FRIENDLY_TO_XSD_URI.get(str(XSD.string)), True)
+def resolve_type_uri(attrtype: str | None) -> tuple[str, bool]:
+    attrtype = _norm_text(attrtype)
+    if not attrtype:
+        return str(XSD.string), True
 
-    if "://" in attr_type or attr_type.startswith("urn:"):
-        prim = primitive_from_range(URIRef(attr_type))
-        return (attr_type, prim is not None)
+    raw = attrtype.strip().strip("<>")
 
-    canonical = _FRIENDLY_TO_XSD_URI.get(attr_type) or _FRIENDLY_TO_XSD_URI.get(attr_type.lower())
-    if canonical:
-        return (canonical, True)
+    def _extract_local_tokens(value: str) -> list[str]:
+        tokens: list[str] = []
 
-    return (_FRIENDLY_TO_XSD_URI.get(str(XSD.string)), True)
+        def _add(v: str | None) -> None:
+            v = _norm_text(v)
+            if not v:
+                return
+            for candidate in (
+                v,
+                v.lower(),
+                _canonical_text(v),
+            ):
+                if candidate and candidate not in tokens:
+                    tokens.append(candidate)
+
+        _add(value)
+
+        cleaned = value.replace("xsd:", "").replace("XSD:", "")
+        cleaned = cleaned.replace("rdf:", "").replace("RDF:", "")
+        cleaned = cleaned.replace("rdfs:", "").replace("RDFS:", "")
+        _add(cleaned)
+
+        for sep in ("#", "/", ":"):
+            if sep in value:
+                tail = value.rsplit(sep, 1)[-1]
+                _add(tail)
+
+        return tokens
+
+    uml_primitive_map = {
+        "string": str(XSD.string),
+        "boolean": str(XSD.boolean),
+        "integer": str(XSD.integer),
+        "int": str(XSD.int),
+        "long": str(XSD.long),
+        "float": str(XSD.float),
+        "real": str(XSD.double),
+        "double": str(XSD.double),
+        "decimal": str(XSD.decimal),
+        "number": str(XSD.decimal),
+        "date": str(XSD.date),
+        "datetime": str(XSD.dateTime),
+        "time": str(XSD.time),
+        "uri": str(XSD.anyURI),
+        "anyuri": str(XSD.anyURI),
+        "literal": str(RDFS.Literal),
+        "langstring": str(RDF.langString),
+    }
+
+    for key in _extract_local_tokens(raw):
+        canonical = _FRIENDLY_TO_XSD_URI.get(key)
+        if canonical:
+            return canonical, True
+
+        canonical = uml_primitive_map.get(key)
+        if canonical:
+            return canonical, True
+
+    if "://" in raw or raw.startswith("urn:"):
+        primitive = primitive_from_range(URIRef(raw))
+        if primitive:
+            canonical = _FRIENDLY_TO_XSD_URI.get(primitive.lower())
+            if canonical:
+                return canonical, True
+        return raw, False
+
+    return str(XSD.string), True
 
 
 def _default_source_format(model: dict[str, Any]) -> str:
@@ -807,27 +867,43 @@ def build_graph_from_xmi_model(
 
     def _parse_semantic_comment(body: str) -> dict[str, str]:
         out: dict[str, str] = {}
+
+        mapping = {
+            "uri": "uri",
+            "label": "label",
+            "definition": "definition",
+            "usage note": "usage_note",
+            "usage_note": "usage_note",
+            "usagenote": "usage_note",
+            "referenced": "referenced",
+            "connector id": "connector_id",
+            "connector_id": "connector_id",
+        }
+
         for raw_line in (body or "").splitlines():
-            line = raw_line.strip()
+            line = (raw_line or "").strip()
             if not line or ":" not in line:
                 continue
+
             key, value = line.split(":", 1)
             k = _canonical_text(key)
-            v = value.strip()
+            field = mapping.get(k)
+            if not field:
+                continue
+
+            v = _norm_text(value)
             if not v:
                 continue
-            if k == "uri":
-                out["uri"] = v
-            elif k == "label":
-                out["label"] = v
-            elif k == "definition":
-                out["definition"] = v
-            elif k in {"usage note", "usagenote"}:
-                out["usage_note"] = v
-            elif k == "referenced":
-                out["referenced"] = v
-            elif k == "connector id":
-                out["connector_id"] = v
+
+            md_link = re.match(r"^\[([^\]]+)\]\(([^)]+)\)$", v)
+            if md_link:
+                if field == "uri":
+                    v = md_link.group(2).strip()
+                elif field == "label":
+                    v = md_link.group(1).strip()
+
+            out[field] = v
+
         return out
 
     def _classifier_uri_from_xml(el: ET.Element) -> URIRef:
@@ -857,31 +933,97 @@ def build_graph_from_xmi_model(
         prop_el: ET.Element,
         classifier_uri_by_id: dict[str, URIRef],
     ) -> tuple[str | None, bool]:
-        type_id = _attr(prop_el, "type")
-        if type_id and type_id in classifier_uri_by_id:
-            return (str(classifier_uri_by_id[type_id]), False)
+        primitive_map = {
+            "string": str(XSD.string),
+            "boolean": str(XSD.boolean),
+            "integer": str(XSD.integer),
+            "int": str(XSD.int),
+            "long": str(XSD.long),
+            "real": str(XSD.double),
+            "double": str(XSD.double),
+            "float": str(XSD.float),
+            "decimal": str(XSD.decimal),
+            "number": str(XSD.decimal),
+            "date": str(XSD.date),
+            "datetime": str(XSD.dateTime),
+            "time": str(XSD.time),
+            "uri": str(XSD.anyURI),
+            "anyuri": str(XSD.anyURI),
+        }
+
+        def _normalize_type_name(value: str | None) -> str | None:
+            raw = _norm_text(value)
+            if not raw:
+                return None
+
+            token = raw.split("#")[-1].split("/")[-1].split(":")[-1].strip()
+            key = token.lower()
+            return primitive_map.get(key)
+
+        def _resolve_type_token(value: str | None) -> tuple[str | None, bool] | None:
+            raw = _norm_text(value)
+            if not raw:
+                return None
+
+            if raw == "uml:Property":
+                return None
+
+            if raw in classifier_uri_by_id:
+                return (str(classifier_uri_by_id[raw]), False)
+
+            primitive_uri = _normalize_type_name(raw)
+            if primitive_uri:
+                return (primitive_uri, True)
+
+            if raw.startswith("http://") or raw.startswith("https://") or raw.startswith("urn:"):
+                if raw in {
+                    str(XSD.string),
+                    str(XSD.boolean),
+                    str(XSD.integer),
+                    str(XSD.int),
+                    str(XSD.long),
+                    str(XSD.float),
+                    str(XSD.double),
+                    str(XSD.decimal),
+                    str(XSD.date),
+                    str(XSD.dateTime),
+                    str(XSD.time),
+                    str(XSD.anyURI),
+                }:
+                    return (raw, True)
+                return (raw, False)
+
+            return None
 
         type_child = _find_first_direct_child(prop_el, "type")
         if type_child is not None:
-            href = _attr(type_child, "href")
-            if href:
-                primitive_name = href.split("#")[-1]
-                primitive_map = {
-                    "String": str(XSD.string),
-                    "Boolean": str(XSD.boolean),
-                    "Integer": str(XSD.integer),
-                    "Real": str(XSD.double),
-                    "Date": str(XSD.date),
-                    "DateTime": str(XSD.dateTime),
-                    "Time": str(XSD.time),
-                    "URI": str(XSD.anyURI),
-                }
-                canonical = primitive_map.get(primitive_name, str(XSD.string))
-                return (canonical, True)
+            for candidate in (
+                _attr(type_child, "href"),
+                _attr(type_child, "idref"),
+                _attr(type_child, "id"),
+                _attr(type_child, "type"),
+                _attr(type_child, "name"),
+            ):
+                resolved = _resolve_type_token(candidate)
+                if resolved is not None:
+                    return resolved
 
-            nested_type_id = _attr(type_child, "type")
-            if nested_type_id and nested_type_id in classifier_uri_by_id:
-                return (str(classifier_uri_by_id[nested_type_id]), False)
+        for candidate in (
+            _attr(prop_el, "datatype"),
+            _attr(prop_el, "classifier"),
+            _attr(prop_el, "type"),
+        ):
+            resolved = _resolve_type_token(candidate)
+            if resolved is not None:
+                return resolved
+
+        for candidate in (
+            _attr(prop_el, "name"),
+            _attr(type_child, "name") if type_child is not None else None,
+        ):
+            primitive_uri = _normalize_type_name(candidate)
+            if primitive_uri:
+                return (primitive_uri, True)
 
         return (str(XSD.string), True)
 
@@ -924,12 +1066,18 @@ def build_graph_from_xmi_model(
             _set_literal(g, onto, RDFS.label, package_name, lang="fr")
         return g
 
-    raw_xmi = (
-        _norm_text(model.get("xmi_raw"))
-        or _norm_text(model.get("xmi_xml"))
-        or ""
-    )
-
+    raw_xmi = ""
+    for key in ("xmi_raw", "xmi_xml", "xmiraw", "xmixml"):
+        candidate = model.get(key) or ""
+        if isinstance(candidate, str) and candidate.lstrip().startswith("<?xml"):
+            raw_xmi = candidate
+            break
+    print("KEYS:", list(model.keys()))
+    print("xmi_raw type:", type(model.get("xmi_raw")))
+    print("xmi_xml type:", type(model.get("xmi_xml")))
+    print("xmi keys:", list(model.get("xmi", {}).keys()) if isinstance(model.get("xmi"), dict) else "N/A")
+    print("xmi_raw[:200]:", repr(model.get("xmi_raw", "")[:200]))
+    print("xmi_xml[:200]:", repr(model.get("xmi_xml", "")[:200]))
     if not raw_xmi:
         xmi = _xmi_view(model)
         elements = xmi.get("elements", [])
@@ -966,6 +1114,7 @@ def build_graph_from_xmi_model(
             return uri
 
         for el in elements:
+            print(elements)
             el_type = _norm_text(el.get("type")) or ""
             if el_type not in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
                 continue
@@ -1004,7 +1153,19 @@ def build_graph_from_xmi_model(
                 attr_usage = _first_tag_value(attr.get("tags_attribute", []), "usageNote-en")
                 attr_type = _norm_text(attr.get("type")) or ""
 
-                canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+                if attr_type == "uml:Property":
+                    attr_type = (
+                        _norm_text(attr.get("datatype"))
+                        or _norm_text(attr.get("range"))
+                        or _norm_text(attr.get("classifier"))
+                        or ""
+                    )
+
+                canonical_range_uri = None
+                is_primitive = True
+
+                if attr_type:
+                    canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
 
                 g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
                 g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
@@ -1290,7 +1451,17 @@ def build_graph_from_xmi_model(
     return g
 
 
-def _graph_from_model(model: dict[str, Any], user: str = "", name: str = "") -> Graph:
+def graph_from_model(model: dict[str, Any], user: str = "", name: str = "") -> Graph:
+    raw_xmi = _norm_text(model.get("xmi_raw")) or _norm_text(model.get("xmi_xml"))
+
+    # Priorité absolue au XMI brut, peu importe source_format
+    if raw_xmi:
+        return build_graph_from_xmi_model(
+            model,
+            user=user,
+            name=name or _norm_text(model.get("name")) or "Generated",
+        )
+
     ttl_raw = _norm_text(model.get("ttl_raw"))
     if ttl_raw:
         g = Graph()
@@ -1309,30 +1480,73 @@ def _graph_from_model(model: dict[str, Any], user: str = "", name: str = "") -> 
 
 
 def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[str, Any]:
+    print("=== upload_model incoming keys:", list(model.keys()))
+    print("=== incoming_format raw:", model.get("source_format"), model.get("sourceformat"))
+    print("=== xmi_raw in model:", repr((model.get("xmi_raw") or "")[:100]))
+    print("=== xmi_xml in model:", repr((model.get("xmi_xml") or "")[:100]))
     fp = ensure_model_exists(user=user, name=name)
     current = _load_model(fp)
 
     if not isinstance(model, dict):
         raise ValueError("model must be a dict")
 
-    incoming_format = (_norm_text(model.get("source_format")) or "").lower()
-    current.update(model)
+    incoming_format = (
+        _norm_text(model.get("source_format"))
+        or _norm_text(model.get("sourceformat"))
+        or ""
+    ).lower()
+
+    # Merge sélectif : on ne laisse pas model écraser les champs critiques avec des valeurs vides
+    for k, v in model.items():
+        if v is not None and v != "" and v != [] and v != {}:
+            current[k] = v
+        elif k not in current:
+            current[k] = v
 
     current.setdefault("elements", [])
     current.setdefault("connectors", [])
-    current.setdefault(
-        "xmi",
-        {
-            "elements": current.get("elements", []),
-            "connectors": current.get("connectors", []),
-        },
-    )
     current.setdefault("ttl", {})
     current.setdefault("ttl_raw", "")
+
+    if not isinstance(current.get("xmi"), dict):
+        current["xmi"] = {
+            "elements": current.get("elements", []),
+            "connectors": current.get("connectors", []),
+        }
+
+    current.setdefault("xmi_raw", "")
+    current.setdefault("xmi_xml", "")
+    current.setdefault("xmiraw", "")
+    current.setdefault("xmixml", "")
+
+    raw_xmi = (
+        _norm_text(model.get("xmi_raw"))
+        or _norm_text(model.get("xmi_xml"))
+        or _norm_text(model.get("xmiraw"))
+        or _norm_text(model.get("xmixml"))
+        or _norm_text(current.get("xmi_raw"))
+        or _norm_text(current.get("xmi_xml"))
+        or _norm_text(current.get("xmiraw"))
+        or _norm_text(current.get("xmixml"))
+        or ""
+    )
 
     if incoming_format == "xmi":
         current["source_format"] = "xmi"
         current["ttl_raw"] = ""
+
+        if raw_xmi:
+            current["xmi_raw"] = raw_xmi
+            current["xmi_xml"] = raw_xmi
+            current["xmiraw"] = raw_xmi
+            current["xmixml"] = raw_xmi
+
+            # Priorité absolue au XML brut : on évite de recycler
+            # une ancienne vue XMI déjà dégradée.
+            current["xmi"] = {"elements": [], "connectors": []}
+            current["elements"] = []
+            current["connectors"] = []
+
     elif incoming_format == "ttl":
         current["source_format"] = "ttl"
     else:
@@ -1344,16 +1558,24 @@ def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[
             "connectors": current.get("connectors", []),
         }
 
-    if current.get("xmi", {}).get("elements") or current.get("xmi", {}).get("connectors"):
-        current["elements"] = current["xmi"].get("elements", [])
-        current["connectors"] = current["xmi"].get("connectors", [])
-    else:
-        current["xmi"] = {
-            "elements": current.get("elements", []),
-            "connectors": current.get("connectors", []),
-        }
+    has_xmi_view = bool(
+        current.get("xmi", {}).get("elements")
+        or current.get("xmi", {}).get("connectors")
+    )
 
-    connector_overrides = _extract_connector_overrides(current)
+    if not raw_xmi:
+        if has_xmi_view:
+            current["elements"] = current["xmi"].get("elements", [])
+            current["connectors"] = current["xmi"].get("connectors", [])
+        else:
+            current["xmi"] = {
+                "elements": current.get("elements", []),
+                "connectors": current.get("connectors", []),
+            }
+            current["elements"] = current["xmi"].get("elements", [])
+            current["connectors"] = current["xmi"].get("connectors", [])
+
+    connector_overrides = {} if raw_xmi else _extract_connector_overrides(current)
 
     if current["source_format"] == "ttl" and _norm_text(current.get("ttl_raw")):
         g = Graph()
@@ -1365,7 +1587,12 @@ def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[
             source_format=current["source_format"],
             connector_overrides=connector_overrides,
         )
-    elif current.get("xmi", {}).get("elements") or current.get("xmi", {}).get("connectors"):
+
+    elif current["source_format"] == "xmi" and (
+        raw_xmi
+        or current.get("xmi", {}).get("elements")
+        or current.get("xmi", {}).get("connectors")
+    ):
         g = build_graph_from_xmi_model(
             current,
             user=user,
@@ -1378,6 +1605,13 @@ def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[
             source_format=current["source_format"],
             connector_overrides=connector_overrides,
         )
+
+        if raw_xmi:
+            current["xmi_raw"] = raw_xmi
+            current["xmi_xml"] = raw_xmi
+            current["xmiraw"] = raw_xmi
+            current["xmixml"] = raw_xmi
+
     else:
         current["xmi"] = {
             "elements": current.get("elements", []),
@@ -1583,7 +1817,7 @@ def add_class(
 
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
-    g = _graph_from_model(model, user=user, name=name or "Generated")
+    g = graph_from_model(model, user=user, name=name or "Generated")
 
     existing = find_class_by_label(g, title)
     if existing:
@@ -1638,7 +1872,7 @@ def add_attribute(
 ) -> dict[str, Any]:
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
-    g = _graph_from_model(model, user=user, name=name or "Generated")
+    g = graph_from_model(model, user=user, name=name or "Generated")
 
     class_uri = find_class_by_label(g, class_name)
     if not class_uri:
@@ -1694,7 +1928,7 @@ def add_connector(
 ) -> dict[str, Any]:
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
-    g = _graph_from_model(model, user=user, name=name or "Generated")
+    g = graph_from_model(model, user=user, name=name or "Generated")
 
     source_uri = find_class_by_label_or_xmi(g, source_name, package_name=name or "Generated")
     if not source_uri:
@@ -1932,6 +2166,14 @@ def build_xmi_bytes(model: dict[str, Any]) -> bytes:
                 upper_value.set("value", upper)
 
     def primitive_href(attr_type: str) -> str | None:
+        canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+        if not canonical_range_uri or not is_primitive:
+            return None
+
+        primitive_name = primitive_from_range(URIRef(canonical_range_uri))
+        if not primitive_name:
+            return None
+
         primitive_map = {
             "String": "String",
             "Boolean": "Boolean",
@@ -1940,14 +2182,13 @@ def build_xmi_bytes(model: dict[str, Any]) -> bytes:
             "Date": "Date",
             "DateTime": "DateTime",
             "Time": "Time",
-            "URI": "String",
+            "URI": "URI",
         }
-        t = text(attr_type)
-        if not t:
-            return None
-        mapped = primitive_map.get(t)
+
+        mapped = primitive_map.get(primitive_name)
         if not mapped:
             return None
+
         return f"http://www.omg.org/spec/UML/20131001/PrimitiveTypes.xmi#{mapped}"
 
     def is_connector_shadow_attribute(attr: dict[str, Any] | None) -> bool:
@@ -2121,6 +2362,9 @@ def build_xmi_bytes(model: dict[str, Any]) -> bytes:
                     )
                     if target_id:
                         owned_attr.set("type", target_id)
+                    elif attr_type:
+                        # Type non résolu : on le met en commentaire pour ne pas perdre l'info
+                        add_comment(owned_attr, f"type: {attr_type}", f"{attr_id}:type_fallback")
 
                 lower, upper = normalize_bounds(
                     attr.get("lower_bounds"),
