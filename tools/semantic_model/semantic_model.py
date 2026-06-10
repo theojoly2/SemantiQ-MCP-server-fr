@@ -76,10 +76,9 @@ def get_model_path(user: str = "", name: str = "") -> str:
 
 
 def _model_uri(user: str, name: str) -> URIRef:
-    return URIRef(
-        f"urn:ai4semantics:model:{
-            _slugify_uri(user or 'default')}:{_slugify_uri(name or 'generated')}"
-    )
+    u = _slugify_uri(user or 'default')
+    n = _slugify_uri(name or 'generated')
+    return URIRef(f"urn:ai4semantics:model:{u}:{n}")
 
 
 def _new_graph(user: str, name: str) -> Graph:
@@ -261,80 +260,19 @@ _FRIENDLY_TO_XSD_URI: dict[str, str] = {
 }
 
 
-def resolve_type_uri(attrtype: str | None) -> tuple[str, bool]:
-    attrtype = _norm_text(attrtype)
-    if not attrtype:
-        return str(XSD.string), True
+def resolve_type_uri(attr_type: str) -> tuple[str, bool]:
+    if not attr_type:
+        return ("", False)
 
-    raw = attrtype.strip().strip("<>")
+    if "://" in attr_type or attr_type.startswith("urn:"):
+        prim = primitive_from_range(URIRef(attr_type))
+        return (attr_type, prim is not None)
 
-    def _extract_local_tokens(value: str) -> list[str]:
-        tokens: list[str] = []
+    canonical = _FRIENDLY_TO_XSD_URI.get(attr_type) or _FRIENDLY_TO_XSD_URI.get(attr_type.lower())
+    if canonical:
+        return (canonical, True)
 
-        def _add(v: str | None) -> None:
-            v = _norm_text(v)
-            if not v:
-                return
-            for candidate in (
-                v,
-                v.lower(),
-                _canonical_text(v),
-            ):
-                if candidate and candidate not in tokens:
-                    tokens.append(candidate)
-
-        _add(value)
-
-        cleaned = value.replace("xsd:", "").replace("XSD:", "")
-        cleaned = cleaned.replace("rdf:", "").replace("RDF:", "")
-        cleaned = cleaned.replace("rdfs:", "").replace("RDFS:", "")
-        _add(cleaned)
-
-        for sep in ("#", "/", ":"):
-            if sep in value:
-                tail = value.rsplit(sep, 1)[-1]
-                _add(tail)
-
-        return tokens
-
-    uml_primitive_map = {
-        "string": str(XSD.string),
-        "boolean": str(XSD.boolean),
-        "integer": str(XSD.integer),
-        "int": str(XSD.int),
-        "long": str(XSD.long),
-        "float": str(XSD.float),
-        "real": str(XSD.double),
-        "double": str(XSD.double),
-        "decimal": str(XSD.decimal),
-        "number": str(XSD.decimal),
-        "date": str(XSD.date),
-        "datetime": str(XSD.dateTime),
-        "time": str(XSD.time),
-        "uri": str(XSD.anyURI),
-        "anyuri": str(XSD.anyURI),
-        "literal": str(RDFS.Literal),
-        "langstring": str(RDF.langString),
-    }
-
-    for key in _extract_local_tokens(raw):
-        canonical = _FRIENDLY_TO_XSD_URI.get(key)
-        if canonical:
-            return canonical, True
-
-        canonical = uml_primitive_map.get(key)
-        if canonical:
-            return canonical, True
-
-    if "://" in raw or raw.startswith("urn:"):
-        primitive = primitive_from_range(URIRef(raw))
-        if primitive:
-            canonical = _FRIENDLY_TO_XSD_URI.get(primitive.lower())
-            if canonical:
-                return canonical, True
-        return raw, False
-
-    return str(XSD.string), True
+    return (attr_type, False)
 
 
 def _default_source_format(model: dict[str, Any]) -> str:
@@ -362,6 +300,7 @@ def extract_ontology_package(g: Graph, custom_name: str | None = None) -> dict[s
         "ID": ea_id("EAPK", pkg_uri),
         "type": "uml:Package",
         "package": "",
+        "uri": pkg_uri,
         "tags": [],
     }
 
@@ -387,6 +326,10 @@ def _xmi_view(model: dict[str, Any]) -> dict[str, Any]:
 
 
 def _class_uri_from_element(el: dict[str, Any]) -> URIRef:
+    uri = _norm_text(el.get("uri"))
+    if uri:
+        return URIRef(uri)
+
     uri = _first_tag_value(el.get("tags", []), "uri")
     if uri:
         return URIRef(uri)
@@ -401,6 +344,10 @@ def _class_uri_from_element(el: dict[str, Any]) -> URIRef:
 
 
 def _attribute_uri(class_uri: URIRef, attr: dict[str, Any]) -> URIRef:
+    uri = _norm_text(attr.get("uri"))
+    if uri:
+        return URIRef(uri)
+
     uri = _first_tag_value(attr.get("tags_attribute", []), "uri")
     if uri:
         return URIRef(uri)
@@ -411,11 +358,11 @@ def _attribute_uri(class_uri: URIRef, attr: dict[str, Any]) -> URIRef:
 
 def _semantic_uri_from_connector_view(conn: dict[str, Any]) -> str:
     return (
-        _norm_text(conn.get("semantic_uri"))
+        _norm_text(conn.get("uri"))
+        or _norm_text(conn.get("semantic_uri"))
         or _first_tag_value(conn.get("tags", []), "semantic_uri")
         or _first_tag_value(conn.get("tags_target", []), "semantic_uri")
         or _first_tag_value(conn.get("tags_source", []), "semantic_uri")
-        or _norm_text(conn.get("uri"))
         or _first_tag_value(conn.get("tags", []), "uri")
         or _first_tag_value(conn.get("tags_target", []), "uri")
         or _first_tag_value(conn.get("tags_source", []), "uri")
@@ -556,6 +503,12 @@ def _extract_connector_overrides(model: dict[str, Any]) -> dict[str, dict[str, A
     return overrides
 
 
+def role_name_from_label(label: str | None) -> str | None:
+    if not label:
+        return None
+    return f"+{label}"
+
+
 def build_model(
     g: Graph,
     package_name: str | None = None,
@@ -595,6 +548,7 @@ def build_model(
             "ID": stored_id,
             "type": "uml:Class",
             "package": root_pkg_id,
+            "uri": uri,
             "tags": tags,
             "attributes": [],
         }
@@ -614,6 +568,7 @@ def build_model(
                 "ID": stored_id,
                 "type": "uml:Class",
                 "package": root_pkg_id,
+                "uri": u,
                 "tags": [
                     {"name": "uri", "value": u},
                     {"name": "referenced", "value": "true"},
@@ -650,7 +605,9 @@ def build_model(
                 domain_elem["attributes"].append(
                     {
                         "name": prop_label,
+                        "ID": ea_id("ATTR", prop_uri),
                         "type": attr_type,
+                        "uri": prop_uri,
                         "lower_bounds": "",
                         "upper_bounds": "",
                         "tags_attribute": attr_tags,
@@ -703,6 +660,7 @@ def build_model(
                     {
                         "connector_id": connector_id,
                         "semantic_uri": prop_uri,
+                        "uri": prop_uri,
                         "source_name": override.get("source_name") or src["name"],
                         "source_id": src["ID"],
                         "target_name": override.get("target_name") or tgt["name"],
@@ -739,6 +697,7 @@ def build_model(
             {
                 "connector_id": connector_id,
                 "semantic_uri": "",
+                "uri": "",
                 "source_name": override.get("source_name") or child_elem["name"],
                 "source_id": child_elem["ID"],
                 "target_name": override.get("target_name") or parent_elem["name"],
@@ -765,6 +724,10 @@ def _sync_model_from_graph(
     source_format: str | None = None,
     connector_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    print(f"[DEBUG _sync_model_from_graph] Début reconstruction du modèle depuis le graphe RDF ({len(g)} triplets)...")
+    classes_in_g = list(g.subjects(RDF.type, OWL.Class))
+    print(f"[DEBUG _sync_model_from_graph] Classes trouvées dans le graphe : {[get_label(g, c) or local_name(c) for c in classes_in_g]}")
+
     json_ld_str = g.serialize(format="json-ld", indent=4)
     ttl_raw = g.serialize(format="turtle")
     xmi = build_model(
@@ -784,30 +747,149 @@ def _sync_model_from_graph(
     model["connectors"] = xmi.get("connectors", [])
     model["source_format"] = (source_format or model.get("source_format") or "ttl").lower()
 
+    for key in ["xmi_raw", "xmi_xml", "xmiraw", "xmixml"]:
+        model.pop(key, None)
+
+    print(f"[DEBUG _sync_model_from_graph] Modèle mis à jour avec {len(model['elements'])} éléments et {len(model['connectors'])} connecteurs.")
     return model
 
 
-def _save_model(fp: Path, model: dict[str, Any]) -> dict[str, Any]:
+def _save_model(fp: Path, model: dict[str, Any], user: str = "", name: str = "") -> dict[str, Any]:
+    """
+    Sauvegarde le modèle JSON principal en forçant l'UTF-8 de manière stricte (ensure_ascii=False).
+    Les fichiers compagnons .ttl et .xmi sont générés uniquement en mémoire lors de l'export.
+    """
+    print(f"[DEBUG _save_model] Début de la sauvegarde dans : {fp}")
     fp.parent.mkdir(parents=True, exist_ok=True)
+    
+    model_name = model.get("name", "Inconnu")
+    print(f"[DEBUG _save_model] Nom du modèle : '{model_name}'")
+    print(f"[DEBUG _save_model] Éléments dans le dictionnaire : {len(model.get('elements', []))}")
+    
+    ttl_raw = model.get("ttl_raw", "")
+    print(f"[DEBUG _save_model] Taille du ttl_raw : {len(ttl_raw)} caractères.")
+    if ttl_raw:
+        print(f"[DEBUG _save_model] Extrait du ttl_raw : {ttl_raw[:150].replace('\n', ' ')}...")
+
+    # Spécification d'encoding="utf-8" et ensure_ascii=False pour figer l'encodage et les accents réels.
     with open(fp, "w", encoding="utf-8") as f:
         json.dump(model, f, ensure_ascii=False, indent=2)
+    print(f"[DEBUG _save_model] Fichier JSON sauvegardé proprement en UTF-8.")
 
     with open(fp, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+        print(f"[DEBUG _save_model] Re-lecture de contrôle réussie. Éléments relus : {len(data.get('elements', []))}")
+        return data
 
 
 def _load_model(fp: Path) -> dict[str, Any]:
+    print(f"[DEBUG _load_model] Tentative de chargement du fichier : {fp}")
     if not fp.exists():
+        print(f"[DEBUG _load_model] Le fichier n'existe pas encore.")
         return {}
 
     try:
+        # Lecture physique stricte en UTF-8 pour éviter les corruptions CP1252 (notamment sur Windows)
         with open(fp, "r", encoding="utf-8") as f:
             raw = f.read().strip()
             if not raw:
+                print(f"[DEBUG _load_model] Fichier vide détecté.")
                 return {}
-            return json.loads(raw)
-    except (json.JSONDecodeError, OSError):
+            print(f"[DEBUG _load_model] Succès de la lecture physique ({len(raw)} caractères). Extrait : {raw[:150]}...")
+            data = json.loads(raw)
+            print(f"[DEBUG _load_model] Clés racine du JSON chargé : {list(data.keys())}")
+    except Exception as e:
+        print(f"[DEBUG _load_model] ERREUR critique lors du chargement : {e}")
         return {}
+
+    # Auto-synchronisation à la volée dès la lecture pour garantir que les fichiers physiques
+    # ont toujours les clés sémantiques 'ttl_raw' et 'ttl' disponibles, même si l'importation brute
+    # a été faite directement via upload_model (restauration stricte) sans synchronisation préalable.
+    raw_xmi = ""
+    for key in ("xmi_raw", "xmi_xml", "xmiraw", "xmixml"):
+        candidate = data.get(key) or ""
+        if isinstance(candidate, str) and candidate.lstrip().startswith("<?xml"):
+            raw_xmi = candidate
+            break
+
+    has_raw_xmi = bool(raw_xmi)
+    has_ttl = bool(_norm_text(data.get("ttl_raw")))
+    has_elements = bool(_xmi_view(data).get("elements"))
+
+    needs_sync = (
+        (has_raw_xmi and (not has_ttl or not has_elements)) or
+        (has_elements and not has_ttl) or
+        (has_ttl and not has_elements)
+    )
+
+    if needs_sync:
+        user = fp.parent.name
+        name = fp.stem
+        print(f"[DEBUG _load_model] Auto-synchronisation sémantique déclenchée à la volée pour user='{user}', name='{name}'...")
+        try:
+            g = graph_from_model(data, user=user, name=name)
+            data = _sync_model_from_graph(
+                g,
+                data,
+                package_name=name or "Generated",
+                source_format="xmi" if has_raw_xmi else "ttl",
+            )
+            # Écriture immédiate du JSON consolidé en UTF-8 sur le disque
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"[DEBUG _load_model] Auto-synchronisation à la volée réussie et enregistrée sur le disque.")
+        except Exception as e:
+            print(f"[DEBUG _load_model] Échec de l'auto-synchronisation : {e}")
+
+    return data
+
+
+def _ensure_synchronized(model: dict[str, Any], user: str, name: str) -> dict[str, Any]:
+    """
+    S'assure que si le modèle chargé contient du XMI ou du TTL brut,
+    il est traduit de manière asynchrone / paresseuse en graphe RDF (ttl_raw) et en éléments d'affichage,
+    puis sauvegardé proprement sur le disque avec ses formats compagnons.
+    """
+    print(f"[DEBUG _ensure_synchronized] Début de la vérification de synchronisation...")
+    if not model:
+        print(f"[DEBUG _ensure_synchronized] Modèle None ou vide.")
+        return model
+
+    raw_xmi = ""
+    for key in ("xmi_raw", "xmi_xml", "xmiraw", "xmixml"):
+        candidate = model.get(key) or ""
+        if isinstance(candidate, str) and candidate.lstrip().startswith("<?xml"):
+            raw_xmi = candidate
+            break
+
+    has_raw_xmi = bool(raw_xmi)
+    has_ttl = bool(_norm_text(model.get("ttl_raw")))
+    has_elements = bool(_xmi_view(model).get("elements"))
+
+    print(f"[DEBUG _ensure_synchronized] Status : has_raw_xmi={has_raw_xmi}, has_ttl={has_ttl}, has_elements={has_elements}")
+
+    # Synchronisation requise si XMI brut ou si TTL brut présent mais pas encore d'éléments pour la vue UML
+    needs_sync = (
+        (has_raw_xmi and (not has_ttl or not has_elements)) or
+        (has_elements and not has_ttl) or
+        (has_ttl and not has_elements)
+    )
+    print(f"[DEBUG _ensure_synchronized] Synchronisation nécessaire ? -> {needs_sync}")
+
+    if needs_sync:
+        print(f"[DEBUG _ensure_synchronized] Lancement du pipeline de synchronisation...")
+        g = graph_from_model(model, user=user, name=name)
+        model = _sync_model_from_graph(
+            g,
+            model,
+            package_name=name or "Generated",
+            source_format="xmi" if has_raw_xmi else "ttl",
+        )
+        fp = _find_file(user, name)
+        model = _save_model(fp, model, user=user, name=name)
+        print(f"[DEBUG _ensure_synchronized] Synchronisation terminée.")
+
+    return model
 
 
 def ensure_model_exists(user: str = "", name: str = "") -> Path:
@@ -825,7 +907,7 @@ def ensure_model_exists(user: str = "", name: str = "") -> Path:
         "source_format": "ttl",
     }
     model = _sync_model_from_graph(g, model, package_name=name or "Generated", source_format="ttl")
-    _save_model(fp, model)
+    _save_model(fp, model, user=user, name=name)
     return fp
 
 
@@ -997,16 +1079,12 @@ def build_graph_from_xmi_model(
 
         type_child = _find_first_direct_child(prop_el, "type")
         if type_child is not None:
-            for candidate in (
-                _attr(type_child, "href"),
-                _attr(type_child, "idref"),
-                _attr(type_child, "id"),
-                _attr(type_child, "type"),
-                _attr(type_child, "name"),
-            ):
-                resolved = _resolve_type_token(candidate)
-                if resolved is not None:
-                    return resolved
+            for k, v in type_child.attrib.items():
+                local_k = k.split("}", 1)[1] if k.startswith("{") else k
+                if local_k in {"idref", "href", "id", "type", "name"}:
+                    resolved = _resolve_type_token(v)
+                    if resolved is not None:
+                        return resolved
 
         for candidate in (
             _attr(prop_el, "datatype"),
@@ -1026,6 +1104,23 @@ def build_graph_from_xmi_model(
                 return (primitive_uri, True)
 
         return (str(XSD.string), True)
+
+    def _resolve_end_type_id(end_el: ET.Element) -> str:
+        tid = _attr(end_el, "type")
+        if tid:
+            return tid
+
+        type_child = _find_first_direct_child(end_el, "type")
+        if type_child is not None:
+            for k, v in type_child.attrib.items():
+                local_k = k.split("}", 1)[1] if k.startswith("{") else k
+                if local_k in {"idref", "href", "id"}:
+                    val = _norm_text(v)
+                    if val:
+                        if "#" in val:
+                            return val.split("#")[-1]
+                        return val
+        return ""
 
     def _parse_literal_value(el: ET.Element) -> str | None:
         value = _attr(el, "value")
@@ -1072,13 +1167,32 @@ def build_graph_from_xmi_model(
         if isinstance(candidate, str) and candidate.lstrip().startswith("<?xml"):
             raw_xmi = candidate
             break
-    print("KEYS:", list(model.keys()))
-    print("xmi_raw type:", type(model.get("xmi_raw")))
-    print("xmi_xml type:", type(model.get("xmi_xml")))
-    print("xmi keys:", list(model.get("xmi", {}).keys()) if isinstance(model.get("xmi"), dict) else "N/A")
-    print("xmi_raw[:200]:", repr(model.get("xmi_raw", "")[:200]))
-    print("xmi_xml[:200]:", repr(model.get("xmi_xml", "")[:200]))
-    if not raw_xmi:
+
+    raw_xml_bytes = b""
+    if raw_xmi:
+        try:
+            if isinstance(raw_xmi, str):
+                # Standardiser la déclaration d'encodage XML vers utf-8.
+                # Cela empêche ElementTree de lever une ParseError s'il rencontre
+                # windows-1252 ou ISO-8859-1 sur une chaîne encodée en octets UTF-8.
+                cleaned_xmi = re.sub(
+                    r'(<\?xml[^>]*?)encoding=["\'].*?["\']',
+                    r'\1encoding="utf-8"',
+                    raw_xmi,
+                    count=1
+                )
+                raw_xml_bytes = cleaned_xmi.encode("utf-8")
+            else:
+                raw_xml_bytes = raw_xmi
+            
+            root = ET.fromstring(raw_xml_bytes)
+            print(f"[DEBUG build_graph_from_xmi_model] Succès du parsing XML de l'import brut.")
+        except Exception as e:
+            print(f"[DEBUG build_graph_from_xmi_model] ERREUR critique lors du parsing XML : {e}")
+            if isinstance(raw_xmi, str):
+                print(f"[DEBUG build_graph_from_xmi_model] Extrait du XMI brut : {raw_xmi[:400]}")
+            return _new_graph(user, name or _norm_text(model.get("name")) or "Generated")
+    else:
         xmi = _xmi_view(model)
         elements = xmi.get("elements", [])
         connectors = xmi.get("connectors", [])
@@ -1114,7 +1228,6 @@ def build_graph_from_xmi_model(
             return uri
 
         for el in elements:
-            print(elements)
             el_type = _norm_text(el.get("type")) or ""
             if el_type not in {"uml:Class", "uml:DataType", "uml:Enumeration"}:
                 continue
@@ -1270,7 +1383,8 @@ def build_graph_from_xmi_model(
 
     try:
         root = ET.fromstring(raw_xmi.encode("utf-8") if isinstance(raw_xmi, str) else raw_xmi)
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG build_graph_from_xmi_model] ERREUR critique lors du parsing XML : {e}")
         return _new_graph(user, name or _norm_text(model.get("name")) or "Generated")
 
     uml_model = None
@@ -1399,8 +1513,12 @@ def build_graph_from_xmi_model(
         source_end = ends[0]
         target_end = ends[1]
 
-        source_id = _attr(source_end, "type")
-        target_id = _attr(target_end, "type")
+        source_id = _resolve_end_type_id(source_end)
+        target_id = _resolve_end_type_id(target_end)
+
+        if source_id is None or target_id is None or source_id == "" or target_id == "":
+            continue
+
         source_uri = classifier_uri_by_id.get(source_id)
         target_uri = classifier_uri_by_id.get(target_id)
 
@@ -1452,185 +1570,85 @@ def build_graph_from_xmi_model(
 
 
 def graph_from_model(model: dict[str, Any], user: str = "", name: str = "") -> Graph:
-    raw_xmi = _norm_text(model.get("xmi_raw")) or _norm_text(model.get("xmi_xml"))
-
-    # Priorité absolue au XMI brut, peu importe source_format
-    if raw_xmi:
-        return build_graph_from_xmi_model(
-            model,
-            user=user,
-            name=name or _norm_text(model.get("name")) or "Generated",
-        )
-
+    print(f"[DEBUG graph_from_model] Chargement du graphe RDF à partir du modèle...")
+    
+    # PRIORITÉ 1 : Si nous avons du Turtle brut (ttl_raw), c'est la vérité sémantique absolue et la plus à jour.
     ttl_raw = _norm_text(model.get("ttl_raw"))
     if ttl_raw:
+        print(f"[DEBUG graph_from_model] Source détectée : Turtle brut (Longueur={len(ttl_raw)}). Construction directe.")
         g = Graph()
-        g.parse(data=ttl_raw, format="turtle")
-        return g
+        try:
+            g.parse(data=ttl_raw, format="turtle")
+            print(f"[DEBUG graph_from_model] Graphe RDF parsé avec succès depuis ttl_raw. {len(g)} triplets chargés.")
+            return g
+        except Exception as e:
+            print(f"[DEBUG graph_from_model] ERREUR critique lors du parsing Turtle : {e}")
+            raise e
 
+    # PRIORITÉ 2 : Si nous avons déjà des éléments et connecteurs pré-remplis dans le modèle (ex: importés via un parseur EA dédié),
+    # nous devons absolument construire le graphe RDF depuis ces derniers !
+    # Cela évite de ré-exécuter notre parseur XML basique sur le XMI brut, ce qui écraserait
+    # et détruirait les données complexes extraites par le parseur Enterprise Architect de l'MCP-server.
     xmi = _xmi_view(model)
-    if xmi.get("elements") or xmi.get("connectors"):
+    if xmi.get("elements"):
+        print(f"[DEBUG graph_from_model] Source détectée : Éléments/Connecteurs pré-existants. Construction du graphe depuis les dictionnaires.")
+        # Pour forcer build_graph_from_xmi_model à utiliser les dictionnaires et NON le XML brut :
+        # on lui passe un modèle temporaire sans xmi_raw/xmi_xml !
+        temp_model = dict(model)
+        for key in ("xmi_raw", "xmi_xml", "xmiraw", "xmixml"):
+            temp_model.pop(key, None)
+        return build_graph_from_xmi_model(
+            temp_model,
+            user=user,
+            name=name or _norm_text(model.get("name")) or "Generated",
+        )
+
+    # PRIORITÉ 3 : Si on n'a ni ttl_raw, ni éléments UML, mais qu'on a du XMI brut, on le parse.
+    raw_xmi = _norm_text(model.get("xmi_raw")) or _norm_text(model.get("xmi_xml"))
+    if raw_xmi:
+        print(f"[DEBUG graph_from_model] Source détectée : XMI brut d'importation (sans éléments pré-existants).")
         return build_graph_from_xmi_model(
             model,
             user=user,
             name=name or _norm_text(model.get("name")) or "Generated",
         )
 
+    print(f"[DEBUG graph_from_model] Aucune source détectée, création d'un nouveau graphe sémantique vierge.")
     return _new_graph(user, name or "Generated")
 
 
-def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[str, Any]:
-    print("=== upload_model incoming keys:", list(model.keys()))
-    print("=== incoming_format raw:", model.get("source_format"), model.get("sourceformat"))
-    print("=== xmi_raw in model:", repr((model.get("xmi_raw") or "")[:100]))
-    print("=== xmi_xml in model:", repr((model.get("xmi_xml") or "")[:100]))
-    fp = ensure_model_exists(user=user, name=name)
-    current = _load_model(fp)
+def upload_model(
+    model: dict[str, Any],
+    user: str = "",
+    name: str = "",
+) -> dict[str, Any]:
+    """
+    Sauvegarde le modèle d'import brut exactement sous son format d'origine (restauration stricte).
+    Note : L'auto-synchronisation est réalisée de manière transparente et synchrone
+    lors de la re-lecture automatique physique ou du premier get_model.
+    """
+    folder_path = MODELS_PATH / user
+    folder_path.mkdir(parents=True, exist_ok=True)
 
-    if not isinstance(model, dict):
-        raise ValueError("model must be a dict")
+    with open(_find_file(user, name), "w", encoding="utf-8") as f:
+        json.dump(model, f, ensure_ascii=False)
 
-    incoming_format = (
-        _norm_text(model.get("source_format"))
-        or _norm_text(model.get("sourceformat"))
-        or ""
-    ).lower()
+    with open(_find_file(user, name), "r", encoding="utf-8") as f:
+        model = json.load(f)
 
-    # Merge sélectif : on ne laisse pas model écraser les champs critiques avec des valeurs vides
-    for k, v in model.items():
-        if v is not None and v != "" and v != [] and v != {}:
-            current[k] = v
-        elif k not in current:
-            current[k] = v
-
-    current.setdefault("elements", [])
-    current.setdefault("connectors", [])
-    current.setdefault("ttl", {})
-    current.setdefault("ttl_raw", "")
-
-    if not isinstance(current.get("xmi"), dict):
-        current["xmi"] = {
-            "elements": current.get("elements", []),
-            "connectors": current.get("connectors", []),
-        }
-
-    current.setdefault("xmi_raw", "")
-    current.setdefault("xmi_xml", "")
-    current.setdefault("xmiraw", "")
-    current.setdefault("xmixml", "")
-
-    raw_xmi = (
-        _norm_text(model.get("xmi_raw"))
-        or _norm_text(model.get("xmi_xml"))
-        or _norm_text(model.get("xmiraw"))
-        or _norm_text(model.get("xmixml"))
-        or _norm_text(current.get("xmi_raw"))
-        or _norm_text(current.get("xmi_xml"))
-        or _norm_text(current.get("xmiraw"))
-        or _norm_text(current.get("xmixml"))
-        or ""
-    )
-
-    if incoming_format == "xmi":
-        current["source_format"] = "xmi"
-        current["ttl_raw"] = ""
-
-        if raw_xmi:
-            current["xmi_raw"] = raw_xmi
-            current["xmi_xml"] = raw_xmi
-            current["xmiraw"] = raw_xmi
-            current["xmixml"] = raw_xmi
-
-            # Priorité absolue au XML brut : on évite de recycler
-            # une ancienne vue XMI déjà dégradée.
-            current["xmi"] = {"elements": [], "connectors": []}
-            current["elements"] = []
-            current["connectors"] = []
-
-    elif incoming_format == "ttl":
-        current["source_format"] = "ttl"
-    else:
-        current["source_format"] = _default_source_format(current)
-
-    if not isinstance(current.get("xmi"), dict):
-        current["xmi"] = {
-            "elements": current.get("elements", []),
-            "connectors": current.get("connectors", []),
-        }
-
-    has_xmi_view = bool(
-        current.get("xmi", {}).get("elements")
-        or current.get("xmi", {}).get("connectors")
-    )
-
-    if not raw_xmi:
-        if has_xmi_view:
-            current["elements"] = current["xmi"].get("elements", [])
-            current["connectors"] = current["xmi"].get("connectors", [])
-        else:
-            current["xmi"] = {
-                "elements": current.get("elements", []),
-                "connectors": current.get("connectors", []),
-            }
-            current["elements"] = current["xmi"].get("elements", [])
-            current["connectors"] = current["xmi"].get("connectors", [])
-
-    connector_overrides = {} if raw_xmi else _extract_connector_overrides(current)
-
-    if current["source_format"] == "ttl" and _norm_text(current.get("ttl_raw")):
-        g = Graph()
-        g.parse(data=current["ttl_raw"], format="turtle")
-        current = _sync_model_from_graph(
-            g,
-            current,
-            package_name=name or "Generated",
-            source_format=current["source_format"],
-            connector_overrides=connector_overrides,
-        )
-
-    elif current["source_format"] == "xmi" and (
-        raw_xmi
-        or current.get("xmi", {}).get("elements")
-        or current.get("xmi", {}).get("connectors")
-    ):
-        g = build_graph_from_xmi_model(
-            current,
-            user=user,
-            name=name or "Generated",
-        )
-        current = _sync_model_from_graph(
-            g,
-            current,
-            package_name=name or "Generated",
-            source_format=current["source_format"],
-            connector_overrides=connector_overrides,
-        )
-
-        if raw_xmi:
-            current["xmi_raw"] = raw_xmi
-            current["xmi_xml"] = raw_xmi
-            current["xmiraw"] = raw_xmi
-            current["xmixml"] = raw_xmi
-
-    else:
-        current["xmi"] = {
-            "elements": current.get("elements", []),
-            "connectors": current.get("connectors", []),
-        }
-        current["elements"] = current["xmi"].get("elements", [])
-        current["connectors"] = current["xmi"].get("connectors", [])
-
-    return _save_model(fp, current)
+    return model
 
 
 def load_full_model(user: str = "", name: str = "") -> dict[str, Any]:
     fp = ensure_model_exists(user=user, name=name)
-    return _load_model(fp)
+    model = _load_model(fp)
+    return _ensure_synchronized(model, user, name)
 
 
 def get_model(user: str = "", name: str = "") -> dict[str, Any]:
     fp = ensure_model_exists(user=user, name=name)
-    return _load_model(fp)
+    model = _load_model(fp)
+    return _ensure_synchronized(model, user, name)
 
 
 def _iter_referenceable_class_uris(g: Graph):
@@ -1733,10 +1751,12 @@ def _find_class_result(
     title: str | None = None,
     uri: str | None = None,
 ) -> dict[str, Any]:
-    for el in model.get("xmi", {}).get("elements", []):
+    for el in _xmi_view(model).get("elements", []):
         if el.get("type") != "uml:Class":
             continue
         if uri:
+            if el.get("uri") == uri:
+                return el
             for tag in el.get("tags", []):
                 if tag.get("name") == "uri" and tag.get("value") == uri:
                     return el
@@ -1751,23 +1771,26 @@ def _find_attribute_result(
     attr_uri: str,
     class_uri: str = "",
 ) -> dict[str, Any]:
-    for el in model.get("xmi", {}).get("elements", []):
+    for el in _xmi_view(model).get("elements", []):
         if el.get("type") != "uml:Class":
             continue
 
         name_match = _canonical_text(el.get("name")) == _canonical_text(class_name)
-        uri_match = class_uri and any(
-            tag.get("name") == "uri" and tag.get("value") == class_uri
-            for tag in el.get("tags", [])
+        uri_match = class_uri and (
+            el.get("uri") == class_uri or
+            any(tag.get("name") == "uri" and tag.get("value") == class_uri for tag in el.get("tags", []))
         )
 
         if not name_match and not uri_match:
             continue
 
         for attr in el.get("attributes", []):
-            for tag in attr.get("tags_attribute", []):
-                if tag.get("name") == "uri" and tag.get("value") == attr_uri:
-                    return attr
+            if attr.get("uri") == attr_uri or any(tag.get("name") == "uri" and tag.get("value") == attr_uri for tag in attr.get("tags_attribute", [])):
+                res = dict(attr)
+                res["class_uri"] = el.get("uri")
+                res["class_id"] = el.get("ID")
+                res["class_name"] = el.get("name")
+                return res
     return {}
 
 
@@ -1780,7 +1803,7 @@ def _find_connector_result(
     rel_label: str = "",
     connector_id: str = "",
 ) -> dict[str, Any]:
-    for conn in model.get("xmi", {}).get("connectors", []):
+    for conn in _xmi_view(model).get("connectors", []):
         if connector_id and _connector_id_from_view(conn) == connector_id:
             return conn
 
@@ -1813,21 +1836,25 @@ def add_class(
     package: str | None = None,
     uri: str | None = None,
 ) -> dict[str, Any]:
+    print(f"[DEBUG add_class] Début add_class : title='{title}', uri='{uri}', user='{user}', name='{name}'")
     package = package or ""
 
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
+    model = _ensure_synchronized(model, user, name)
     g = graph_from_model(model, user=user, name=name or "Generated")
 
     existing = find_class_by_label(g, title)
+    print(f"[DEBUG add_class] Recherche de classe existante pour '{title}'... Trouvée : {existing}")
     if existing:
+        print(f"[DEBUG add_class] La classe '{title}' existe déjà sous l'URI sémantique {existing}. Synchronisation et sauvegarde.")
         model = _sync_model_from_graph(
             g,
             model,
             package_name=name or "Generated",
             source_format=_default_source_format(model),
         )
-        _save_model(fp, model)
+        _save_model(fp, model, user=user, name=name)
         return _find_class_result(model, title=title) or {
             "error": f"La classe '{title}' existe déjà."
         }
@@ -1842,6 +1869,7 @@ def add_class(
     else:
         class_uri = URIRef(f"urn:class:{_slugify_uri(title)}")
 
+    print(f"[DEBUG add_class] Enregistrement de la nouvelle classe avec l'URI : {class_uri}")
     g.add((class_uri, RDF.type, OWL.Class))
     _set_literal(g, class_uri, RDFS.label, title, lang="fr")
     _set_literal(g, class_uri, RDFS.comment, definition, lang="fr")
@@ -1853,9 +1881,11 @@ def add_class(
         package_name=name or "Generated",
         source_format=_default_source_format(model),
     )
-    model = _save_model(fp, model)
+    model = _save_model(fp, model, user=user, name=name)
 
-    return _find_class_result(model, title=title) or {
+    result = _find_class_result(model, title=title)
+    print(f"[DEBUG add_class] Résultat renvoyé après ajout : {bool(result)}")
+    return result or {
         "error": f"Classe '{title}' créée mais introuvable dans le résultat."
     }
 
@@ -1870,28 +1900,52 @@ def add_attribute(
     user: str = "",
     name: str = "",
 ) -> dict[str, Any]:
+    print(f"[DEBUG add_attribute] Début add_attribute : class_name='{class_name}', attr_label='{attr_label}', attr_uri='{attr_uri}'")
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
+    model = _ensure_synchronized(model, user, name)
     g = graph_from_model(model, user=user, name=name or "Generated")
 
     class_uri = find_class_by_label(g, class_name)
+    print(f"[DEBUG add_attribute] Recherche de la classe parent '{class_name}'... Trouvée : {class_uri}")
     if not class_uri:
+        print(f"[DEBUG add_attribute] ERREUR: La classe parent '{class_name}' est introuvable!")
+        all_classes_labels = [get_label(g, c) or local_name(c) for c in g.subjects(RDF.type, OWL.Class)]
+        print(f"[DEBUG add_attribute] Classes actuellement disponibles dans le graphe : {all_classes_labels}")
         return {"error": f"Classe source introuvable : '{class_name}'"}
 
     prop_uri = URIRef(attr_uri)
+    print(f"[DEBUG add_attribute] Ajout des triplets pour l'attribut URI: {prop_uri}")
     _set_literal(g, prop_uri, RDFS.label, attr_label, lang="fr")
     _set_literal(g, prop_uri, RDFS.comment, attr_definition, lang="fr")
     _set_literal(g, prop_uri, SKOS.scopeNote, attr_usage_note, lang="fr")
     _add_uri(g, prop_uri, RDFS.domain, class_uri)
 
-    canonical_range_uri, _ = resolve_type_uri(attr_type)
+    canonical_range_uri, is_primitive = resolve_type_uri(attr_type)
+    print(f"[DEBUG add_attribute] Type d'attribut résolu : range='{canonical_range_uri}', is_primitive={is_primitive}")
 
     g.remove((prop_uri, RDF.type, OWL.DatatypeProperty))
     g.remove((prop_uri, RDF.type, OWL.ObjectProperty))
     g.remove((prop_uri, RDFS.range, None))
 
-    g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
-    _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
+    if is_primitive:
+        g.add((prop_uri, RDF.type, OWL.DatatypeProperty))
+        _set_uri(g, prop_uri, RDFS.range, canonical_range_uri)
+    else:
+        g.add((prop_uri, RDF.type, OWL.ObjectProperty))
+        # Essayer de trouver la classe existante par son label sémantique
+        target_uri = find_class_by_label(g, attr_type)
+        if not target_uri:
+            # Sinon, générer un URI propre
+            if "://" in attr_type or attr_type.startswith("urn:"):
+                target_uri = URIRef(attr_type)
+            else:
+                target_uri = URIRef(f"urn:class:{_slugify_uri(attr_type)}")
+            # Créer la classe si elle n'existe pas pour préserver le typage OWL
+            g.add((target_uri, RDF.type, OWL.Class))
+            _set_literal(g, target_uri, RDFS.label, attr_type, lang="fr")
+        
+        _set_uri(g, prop_uri, RDFS.range, target_uri)
 
     model = _sync_model_from_graph(
         g,
@@ -1899,14 +1953,16 @@ def add_attribute(
         package_name=name or "Generated",
         source_format=_default_source_format(model),
     )
-    model = _save_model(fp, model)
+    model = _save_model(fp, model, user=user, name=name)
 
-    return _find_attribute_result(
+    result = _find_attribute_result(
         model,
         class_name=class_name,
         attr_uri=attr_uri,
-        class_uri=str(class_uri),   # ← fix : recherche par URI si le nom normalisé ne matche pas
-    ) or {
+        class_uri=str(class_uri),
+    )
+    print(f"[DEBUG add_attribute] Résultat renvoyé après ajout : {bool(result)}")
+    return result or {
         "error": f"Attribut '{attr_label}' créé mais introuvable dans le résultat."
     }
 
@@ -1926,16 +1982,22 @@ def add_connector(
     user: str = "",
     name: str = "",
 ) -> dict[str, Any]:
+    print(f"[DEBUG add_connector] Début add_connector : source='{source_name}', target='{target_name}', label='{rel_label}', type='{relationship}'")
     fp = ensure_model_exists(user=user, name=name)
     model = _load_model(fp)
+    model = _ensure_synchronized(model, user, name)
     g = graph_from_model(model, user=user, name=name or "Generated")
 
     source_uri = find_class_by_label_or_xmi(g, source_name, package_name=name or "Generated")
+    print(f"[DEBUG add_connector] Résolution de la classe source sémantique : {source_uri}")
     if not source_uri:
+        print(f"[DEBUG add_connector] ERREUR: Classe source '{source_name}' introuvable!")
         return {"error": f"Classe source introuvable : '{source_name}'"}
 
     target_uri = find_class_by_label_or_xmi(g, target_name, package_name=name or "Generated")
+    print(f"[DEBUG add_connector] Résolution de la classe cible sémantique : {target_uri}")
     if not target_uri:
+        print(f"[DEBUG add_connector] ERREUR: Classe cible '{target_name}' introuvable!")
         return {"error": f"Classe cible introuvable : '{target_name}'"}
 
     relationship = _norm_text(relationship) or "Association"
@@ -1952,6 +2014,7 @@ def add_connector(
         str(source_uri),
         str(target_uri),
     )
+    print(f"[DEBUG add_connector] Enregistrement du connecteur ID={connector_id}")
 
     if relationship == "Generalization":
         g.add((source_uri, RDFS.subClassOf, target_uri))
@@ -1995,9 +2058,9 @@ def add_connector(
         source_format=_default_source_format(model),
         connector_overrides=connector_overrides,
     )
-    model = _save_model(fp, model)
+    model = _save_model(fp, model, user=user, name=name)
 
-    return _find_connector_result(
+    result = _find_connector_result(
         model,
         rel_uri=rel_uri,
         relationship=relationship,
@@ -2005,7 +2068,9 @@ def add_connector(
         target_name=target_name,
         rel_label=rel_label,
         connector_id=connector_id,
-    ) or {
+    )
+    print(f"[DEBUG add_connector] Connecteur recherché dans le résultat : {bool(result)}")
+    return result or {
         "error": f"Connecteur '{rel_label}' créé mais introuvable dans le résultat."
     }
 
@@ -2363,7 +2428,6 @@ def build_xmi_bytes(model: dict[str, Any]) -> bytes:
                     if target_id:
                         owned_attr.set("type", target_id)
                     elif attr_type:
-                        # Type non résolu : on le met en commentaire pour ne pas perdre l'info
                         add_comment(owned_attr, f"type: {attr_type}", f"{attr_id}:type_fallback")
 
                 lower, upper = normalize_bounds(
