@@ -416,6 +416,7 @@ def _load_best_view_for_document(
     document_id: str,
     best_chunk_index: int,
     return_full_document: bool = True,
+    is_single_doc: bool = False,
 ) -> tuple[str, str]:
     ordered = _load_document_chunks(document_id)
 
@@ -440,8 +441,27 @@ def _load_best_view_for_document(
         ).strip()
         return filename, full_text
 
-    start_idx = max(0, best_chunk_index - WINDOW_RADIUS)
-    end_idx = min(total_chunks - 1, best_chunk_index + WINDOW_RADIUS)
+    # Rayon effectif : triplé si on ne demande qu'un seul document
+    eff_radius = WINDOW_RADIUS * 3 if is_single_doc else WINDOW_RADIUS
+
+    start_idx = best_chunk_index - eff_radius
+    end_idx = best_chunk_index + eff_radius
+
+    # Décalage vers le bas si on manque de chunks au-dessus
+    if start_idx < 0:
+        missing_start = 0 - start_idx
+        end_idx += missing_start
+        start_idx = 0
+
+    # Décalage vers le haut si on manque de chunks en-dessous
+    if end_idx >= total_chunks:
+        missing_end = end_idx - (total_chunks - 1)
+        start_idx -= missing_end
+        end_idx = total_chunks - 1
+
+    # Sécurisation finale pour éviter les index négatifs (si le document est très petit)
+    if start_idx < 0:
+        start_idx = 0
 
     selected = [
         p for p in ordered
@@ -548,12 +568,16 @@ def retrieve_documents(
         grouped_docs = _group_best_chunk_per_document(points)
         stable_candidate_docs = grouped_docs[:RERANK_POOL_SIZE]
 
+        # On active la compensation maximale si le LLM ne veut qu'un seul résultat
+        is_single_doc = (limit == 1)
+
         candidate_docs: list[dict[str, Any]] = []
         for doc in stable_candidate_docs:
             filename, text = _load_best_view_for_document(
                 document_id=doc["document_id"],
                 best_chunk_index=doc["best_chunk_index"],
                 return_full_document=return_full_document,
+                is_single_doc=is_single_doc,
             )
 
             candidate_docs.append({

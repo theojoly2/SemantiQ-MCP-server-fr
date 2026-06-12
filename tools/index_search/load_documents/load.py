@@ -6,6 +6,7 @@ import json
 import csv
 from io import StringIO
 from typing import Any
+import pymupdf4llm
 
 from qdrant_client.models import (
     Distance,
@@ -19,7 +20,6 @@ try:
     from .load_documents import config as cf
 except ImportError:
     import config as cf
-
 
 client = cf.client
 model = cf.model
@@ -218,6 +218,16 @@ def read_text_document(filepath: Path) -> tuple[str, str]:
     )
 
 
+def read_pdf_document(filepath: Path) -> tuple[str, str]:
+    """
+    Lit un document PDF et le convertit en Markdown en utilisant pymupdf4llm.
+    """
+
+    print(f"[~] Converting PDF to Markdown via pymupdf4llm: {filepath.name}")
+    md_text = pymupdf4llm.to_markdown(str(filepath))
+    return md_text, "pdf-to-markdown"
+
+
 def optimize_json_preserving_standards(data: Any) -> str:
     def transform(obj: Any) -> Any:
         if isinstance(obj, dict):
@@ -401,7 +411,8 @@ def optimize_document_content(filepath: Path, text: str) -> tuple[str, bool]:
             optimized = optimize_html_content(text)
             return optimized, optimized != text
 
-        if ext in (".md", ".markdown", ".rst", ".adoc", ".txt"):
+        # Les PDF convertis en Markdown passent par ici également
+        if ext in (".md", ".markdown", ".rst", ".adoc", ".txt", ".pdf"):
             optimized = optimize_markdown_content(text)
             return optimized, optimized != text
 
@@ -741,8 +752,14 @@ def index_documents():
         if not filepath.is_file():
             continue
 
+        ext = filepath.suffix.lower()
+
         try:
-            text, encodingused = read_text_document(filepath)
+            if ext == ".pdf":
+                text, encodingused = read_pdf_document(filepath)
+            else:
+                text, encodingused = read_text_document(filepath)
+
             optimized_text, was_optimized = optimize_document_content(filepath, text)
 
             if was_optimized:
