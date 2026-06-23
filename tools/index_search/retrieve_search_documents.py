@@ -331,7 +331,7 @@ def retrieve_search_documents(
 
         points = _limit_chunks_per_document(points, MAX_CHUNKS_PER_DOCUMENT)
         grouped_docs = _group_best_chunk_per_document(points)
-        
+
         candidate_docs = grouped_docs[:RERANK_POOL_SIZE]
 
         doc_ids_needed = [doc["document_id"] for doc in candidate_docs]
@@ -348,7 +348,7 @@ def retrieve_search_documents(
             tags_str = ", ".join(doc_tags_map.get(doc["document_id"], [])) or "Inconnue"
             enriched_chunk = f"Source : {tags_str}\nFichier : {doc.get('filename', '')}\nContenu : {str(doc.get('best_chunk_text', ''))[:1024]}"
             chunk_pairs.append([search_terms, enriched_chunk])
-            
+
         if chunk_pairs:
             chunk_scores = parallel_rerank(chunk_pairs, batch_size=24)
             for i, doc in enumerate(candidate_docs):
@@ -358,7 +358,7 @@ def retrieve_search_documents(
         # --- ÉTAPE 2 : RERANKING HYBRIDE DES RÉSUMÉS EN PARALLÈLE ---
         top_n = min(30, len(candidate_docs))
         finalists = candidate_docs[:top_n]
-        
+
         summary_pairs = []
         for doc in finalists:
             tags_str = ", ".join(doc_tags_map.get(doc["document_id"], [])) or "Inconnue"
@@ -377,11 +377,11 @@ def retrieve_search_documents(
         # FORMATAGE FINAL
         final_results = [
             (
-                doc["filename"], 
+                doc["filename"],
                 doc.get("best_chunk_text", ""),
                 doc.get("doc_summary", "") or "Aucun résumé",
-                doc.get("chunk0_id"), 
-                float(doc.get("rerank_score", 0.0)), 
+                doc.get("chunk0_id"),
+                float(doc.get("rerank_score", 0.0)),
                 doc_tags_map.get(doc["document_id"], [])
             )
             for doc in candidate_docs[:limit]
