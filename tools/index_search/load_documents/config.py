@@ -36,7 +36,7 @@ with CONFIG_PATH.open("r", encoding="utf-8") as f:
 # =========================================================
 class HFTransformerReranker:
     """
-    GPU  → INT8 bitsandbytes
+    GPU  → FP16
     CPU  → ONNX INT8 (Q8 auto export + quantization)
     """
 
@@ -55,16 +55,14 @@ class HFTransformerReranker:
             self.model = self._load_cpu_q8()
 
     # =====================================================
-    # GPU INT8
+    # GPU FP16
     # =====================================================
     def _load_gpu(self):
-        quant_config = BitsAndBytesConfig(load_in_8bit=True)
-
-        return AutoModelForSequenceClassification.from_pretrained(
+        model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name,
-            quantization_config=quant_config,
-            device_map="auto",
+            torch_dtype=torch.float16,
         )
+        return model.to(self.device)
 
     # =====================================================
     # CPU ONNX + AUTO Q8
