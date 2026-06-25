@@ -298,7 +298,8 @@ def retrieve_search_documents(
     search_terms: str,
     tags: list = None,
     limit: int = None,
-) -> List[Tuple[str, str, str, Any, float, list]]:
+) -> List[Tuple[str, str, str, Any, float, list, str, int]]:
+    #                                                  ^^^^ document_id  ^^^^ best_chunk_index
     if limit is None:
         limit = RERANK_POOL_SIZE
 
@@ -358,6 +359,7 @@ def retrieve_search_documents(
         # --- ÉTAPE 2 : RERANKING HYBRIDE DES RÉSUMÉS EN PARALLÈLE ---
         top_n = min(30, len(candidate_docs))
         finalists = candidate_docs[:top_n]
+        rest = candidate_docs[top_n:]
 
         summary_pairs = []
         for doc in finalists:
@@ -372,21 +374,24 @@ def retrieve_search_documents(
                 if i < len(summary_scores):
                     doc["rerank_score"] = (0.5 * doc["rerank_score"]) + (0.5 * float(summary_scores[i]))
             finalists.sort(key=lambda x: x["rerank_score"], reverse=True)
-            candidate_docs = finalists
 
-        # FORMATAGE FINAL
+        # Reconstruction complète + tri global final
+        candidate_docs = finalists + rest
+        candidate_docs.sort(key=lambda x: x["rerank_score"], reverse=True)
+
         final_results = [
             (
-                doc["filename"],
-                doc.get("best_chunk_text", ""),
-                doc.get("doc_summary", "") or "Aucun résumé",
-                doc.get("chunk0_id"),
-                float(doc.get("rerank_score", 0.0)),
-                doc_tags_map.get(doc["document_id"], [])
+                doc["filename"],                                    # [0]
+                doc.get("best_chunk_text", ""),                     # [1]
+                doc.get("doc_summary", "") or "Aucun résumé",       # [2]
+                doc.get("chunk0_id"),                               # [3]
+                float(doc.get("rerank_score", 0.0)),                # [4]
+                doc_tags_map.get(doc["document_id"], []),           # [5]
+                doc["document_id"],                                 # [6]
+                int(doc.get("best_chunk_index", 0)),                # [7]
             )
             for doc in candidate_docs[:limit]
         ]
-
         print(f"[Search] Opération complète terminée en {time.time()-t_start:.2f}s")
         return final_results
 
