@@ -52,11 +52,37 @@ async def async_retrieve_search_documents(search_terms: str, limit: int = 20, ta
     return {"result": results}
 
 
+async def async_retrieve_document_context(document_id: str, query: str, top_k: int = 3, window_size: int = 1) -> dict:
+    """Wrapper asynchrone pour l'extraction de contexte RAG."""
+    loop = asyncio.get_running_loop()
+
+    func = functools.partial(
+        tools.retrieve_document_context,
+        document_id=document_id,
+        query=query,
+        top_k=top_k,
+        window_size=window_size
+    )
+
+    # Exécution dans le thread pool pour ne pas bloquer l'Event Loop
+    results = await loop.run_in_executor(ai_thread_pool, func)
+
+    # Formatage JSON sécurisé
+    return {"result": results}
+
+
 # --- ENREGISTREMENT DES OUTILS ---
 mcp.add_tool(
     Tool.from_function(
         async_retrieve_search_documents,
         name="retrieve_search_documents",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        async_retrieve_document_context,
+        name="retrieve_document_context",
     )
 )
 
@@ -73,6 +99,7 @@ mcp.add_tool(
         name="get_document_file",
     )
 )
+
 
 event_store = EventStore()
 app = mcp.http_app(

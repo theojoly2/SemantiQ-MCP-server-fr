@@ -60,7 +60,7 @@ class HFTransformerReranker:
     def _load_gpu(self):
         model = AutoModelForSequenceClassification.from_pretrained(
             self.model_name,
-            torch_dtype=torch.float16,
+            dtype=torch.float16,
         )
         return model.to(self.device)
 
