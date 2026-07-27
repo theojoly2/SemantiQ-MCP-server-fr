@@ -70,7 +70,7 @@ async def list_models(user: str = "") -> dict[str, Any]:
                 models.append({
                     "name": fp.stem,
                     "source_format": data.get("source_format", ""),
-                    "last_opened_at": stat.st_mtime,
+                    "last_opened_at": int(stat.st_mtime),
                 })
             except Exception:
                 models.append({"name": fp.stem, "source_format": "", "last_opened_at": 0})
