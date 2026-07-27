@@ -48,19 +48,24 @@ async def get_model(user: str = "", name: str = "") -> dict[str, Any]:
 
 
 async def list_models(user: str = "") -> dict[str, Any]:
-    """List all persisted model names for a user."""
+    """List all persisted model names for a user, with last opened/access time."""
+    import os
     user_dir = Path(MODELS_PATH) / _sanitize(user, "default")
     models = []
     if user_dir.exists():
-        for fp in sorted(user_dir.glob("*.json")):
+        for fp in user_dir.glob("*.json"):
             try:
                 data = load_full_model(user=user, name=fp.stem)
+                stat = os.stat(fp)
                 models.append({
                     "name": fp.stem,
                     "source_format": data.get("source_format", ""),
+                    "last_opened_at": stat.st_mtime,
                 })
             except Exception:
-                models.append({"name": fp.stem, "source_format": ""})
+                models.append({"name": fp.stem, "source_format": "", "last_opened_at": 0})
+    # Most recently opened first
+    models.sort(key=lambda m: m.get("last_opened_at", 0), reverse=True)
     return {"models": models}
 
 
