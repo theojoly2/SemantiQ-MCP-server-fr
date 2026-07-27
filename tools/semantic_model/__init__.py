@@ -47,16 +47,22 @@ async def get_model(user: str = "", name: str = "") -> dict[str, Any]:
     return await loop.run_in_executor(ai_thread_pool, func)
 
 
+def _now_ms() -> int:
+    import time
+    return int(time.time() * 1000)
+
+
 async def touch_model(user: str = "", name: str = "") -> dict[str, Any]:
     """Update the model file modification time without changing its content."""
     import os
-    import time
     fp = _model_path(user, name)
     if not fp.exists():
         return {"error": f"Model {name} not found"}
-    now = time.time()
-    os.utime(fp, (now, now))
-    return {"ok": True, "last_opened_at": int(now)}
+    now_ms = _now_ms()
+    # os.utime takes seconds; keep millisecond precision for the return value.
+    now_s = now_ms / 1000.0
+    os.utime(fp, (now_s, now_s))
+    return {"ok": True, "last_opened_at": now_ms}
 
 
 async def list_models(user: str = "") -> dict[str, Any]:
@@ -72,7 +78,7 @@ async def list_models(user: str = "") -> dict[str, Any]:
                 models.append({
                     "name": fp.stem,
                     "source_format": data.get("source_format", ""),
-                    "last_opened_at": int(stat.st_mtime),
+                    "last_opened_at": int(stat.st_mtime * 1000),
                 })
             except Exception:
                 models.append({"name": fp.stem, "source_format": "", "last_opened_at": 0})
