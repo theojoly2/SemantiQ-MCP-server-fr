@@ -11,6 +11,7 @@ except Exception:
 
 from .semantic_model import upload_model
 from .semantic_model import get_model
+from .semantic_model import touch_model
 from .semantic_model import list_models
 from .semantic_model import rename_model
 from .semantic_model import delete_model
@@ -22,6 +23,7 @@ __all__ = [
     "retrieve_document_context",
     "upload_model",
     "get_model",
+    "touch_model",
     "list_models",
     "rename_model",
     "delete_model",

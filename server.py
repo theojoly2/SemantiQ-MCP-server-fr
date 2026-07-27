@@ -116,6 +116,13 @@ mcp.add_tool(
 
 mcp.add_tool(
     Tool.from_function(
+        tools.touch_model,
+        name="touch_model",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
         tools.list_models,
         name="list_models",
     )

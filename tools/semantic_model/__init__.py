@@ -47,6 +47,16 @@ async def get_model(user: str = "", name: str = "") -> dict[str, Any]:
     return await loop.run_in_executor(ai_thread_pool, func)
 
 
+async def touch_model(user: str = "", name: str = "") -> dict[str, Any]:
+    """Update the model file modification time without changing its content."""
+    import os
+    fp = _model_path(user, name)
+    if not fp.exists():
+        return {"error": f"Model {name} not found"}
+    os.utime(fp, None)
+    return {"ok": True}
+
+
 async def list_models(user: str = "") -> dict[str, Any]:
     """List all persisted model names for a user, with last opened/access time."""
     import os
@@ -101,6 +111,7 @@ async def delete_model(user: str = "", name: str = "") -> dict[str, Any]:
 __all__ = [
     "upload_model",
     "get_model",
+    "touch_model",
     "list_models",
     "rename_model",
     "delete_model",
