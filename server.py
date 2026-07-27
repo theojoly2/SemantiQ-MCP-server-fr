@@ -100,6 +100,41 @@ mcp.add_tool(
     )
 )
 
+mcp.add_tool(
+    Tool.from_function(
+        tools.upload_model,
+        name="upload_model",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools.get_model,
+        name="get_model",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools.list_models,
+        name="list_models",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools.rename_model,
+        name="rename_model",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools.delete_model,
+        name="delete_model",
+    )
+)
+
 
 event_store = EventStore()
 app = mcp.http_app(
