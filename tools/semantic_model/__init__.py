@@ -50,11 +50,13 @@ async def get_model(user: str = "", name: str = "") -> dict[str, Any]:
 async def touch_model(user: str = "", name: str = "") -> dict[str, Any]:
     """Update the model file modification time without changing its content."""
     import os
+    import time
     fp = _model_path(user, name)
     if not fp.exists():
         return {"error": f"Model {name} not found"}
-    os.utime(fp, None)
-    return {"ok": True}
+    now = time.time()
+    os.utime(fp, (now, now))
+    return {"ok": True, "last_opened_at": int(now)}
 
 
 async def list_models(user: str = "") -> dict[str, Any]:
