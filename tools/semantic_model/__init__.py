@@ -14,6 +14,9 @@ from typing import Any
 from config import config
 from resources.semantic_model.utils import MODELS_PATH
 from tools.semantic_model.semantic_model import (
+    add_attribute,
+    add_class,
+    add_connector,
     get_model as _get_model_file,
     load_full_model,
     upload_model as _upload_model_file,
@@ -123,4 +126,7 @@ __all__ = [
     "list_models",
     "rename_model",
     "delete_model",
+    "add_class",
+    "add_attribute",
+    "add_connector",
 ]

@@ -72,73 +72,100 @@ async def async_retrieve_document_context(document_id: str, query: str, top_k: i
 
 
 # --- ENREGISTREMENT DES OUTILS ---
-mcp.add_tool(
-    Tool.from_function(
-        async_retrieve_search_documents,
-        name="retrieve_search_documents",
+# Search tools are optional when qdrant_client is unavailable. Register them
+# only if the underlying functions were successfully imported.
+if tools.retrieve_search_documents is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            async_retrieve_search_documents,
+            name="retrieve_search_documents",
+        )
     )
-)
+
+if tools.retrieve_document_context is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            async_retrieve_document_context,
+            name="retrieve_document_context",
+        )
+    )
+
+if tools.get_available_tags is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.get_available_tags,
+            name="get_available_tags",
+        )
+    )
+
+if tools.get_document_file is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.get_document_file,
+            name="get_document_file",
+        )
+    )
 
 mcp.add_tool(
     Tool.from_function(
-        async_retrieve_document_context,
-        name="retrieve_document_context",
-    )
-)
-
-mcp.add_tool(
-    Tool.from_function(
-        tools.get_available_tags,
-        name="get_available_tags",
-    )
-)
-
-mcp.add_tool(
-    Tool.from_function(
-        tools.get_document_file,
-        name="get_document_file",
-    )
-)
-
-mcp.add_tool(
-    Tool.from_function(
-        tools.upload_model,
+        tools._upload_model,
         name="upload_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools.get_model,
+        tools._get_model,
         name="get_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools.touch_model,
+        tools._touch_model,
         name="touch_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools.list_models,
+        tools._list_models,
         name="list_models",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools.rename_model,
+        tools._rename_model,
         name="rename_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools.delete_model,
+        tools._delete_model,
         name="delete_model",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools._add_class,
+        name="add_class",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools._add_attribute,
+        name="add_attribute",
+    )
+)
+
+mcp.add_tool(
+    Tool.from_function(
+        tools._add_connector,
+        name="add_connector",
     )
 )
 
