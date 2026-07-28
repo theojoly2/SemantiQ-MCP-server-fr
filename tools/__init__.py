@@ -1,3 +1,7 @@
+import asyncio
+import functools
+from concurrent.futures import ThreadPoolExecutor
+
 try:
     from .index_search import retrieve_search_documents
     from .index_search import get_available_tags
@@ -15,49 +19,53 @@ from .semantic_model import touch_model
 from .semantic_model import list_models
 from .semantic_model import rename_model
 from .semantic_model import delete_model
-from .semantic_model import add_class
-from .semantic_model import add_attribute
-from .semantic_model import add_connector
+from .semantic_model import add_class as _add_class_sync
+from .semantic_model import add_attribute as _add_attribute_sync
+from .semantic_model import add_connector as _add_connector_sync
+from .semantic_model import upload_model as _upload_model_sync
+from .semantic_model import get_model as _get_model_sync
+from .semantic_model import touch_model as _touch_model_sync
+from .semantic_model import list_models as _list_models_sync
+from .semantic_model import rename_model as _rename_model_sync
+from .semantic_model import delete_model as _delete_model_sync
 
 
-def _identity(fn):
-    return fn
+# The underlying semantic_model functions are synchronous. fastmcp expects the
+# registered tool function itself to be awaitable (or a plain callable, but in
+# this version it tries to `await` the tool result). We run the blocking work in
+# a thread pool and return a coroutine so the framework can await it safely.
+_thread_pool = ThreadPoolExecutor(max_workers=2)
 
 
-# Wrap async semantic-model tools so server.py can register them as plain tools
-# even when running in an environment without qdrant_client (search tools are None).
-# The wrappers are transparent at runtime; they preserve the original signatures.
-@_identity
+def _run_sync(fn, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    return loop.run_in_executor(_thread_pool, functools.partial(fn, *args, **kwargs))
+
+
 async def _upload_model(model: dict, user: str = "", name: str = "") -> dict:
-    return await upload_model(model=model, user=user, name=name)
+    return await _run_sync(_upload_model_sync, model=model, user=user, name=name)
 
 
-@_identity
 async def _get_model(user: str = "", name: str = "") -> dict:
-    return await get_model(user=user, name=name)
+    return await _run_sync(_get_model_sync, user=user, name=name)
 
 
-@_identity
 async def _touch_model(user: str = "", name: str = "") -> dict:
-    return await touch_model(user=user, name=name)
+    return await _run_sync(_touch_model_sync, user=user, name=name)
 
 
-@_identity
 async def _list_models(user: str = "") -> dict:
-    return await list_models(user=user)
+    return await _run_sync(_list_models_sync, user=user)
 
 
-@_identity
 async def _rename_model(user: str = "", old_name: str = "", new_name: str = "") -> dict:
-    return await rename_model(user=user, old_name=old_name, new_name=new_name)
+    return await _run_sync(_rename_model_sync, user=user, old_name=old_name, new_name=new_name)
 
 
-@_identity
 async def _delete_model(user: str = "", name: str = "") -> dict:
-    return await delete_model(user=user, name=name)
+    return await _run_sync(_delete_model_sync, user=user, name=name)
 
 
-@_identity
 async def _add_class(
     title: str,
     definition: str,
@@ -67,7 +75,8 @@ async def _add_class(
     package: str | None = None,
     uri: str | None = None,
 ) -> dict:
-    return await add_class(
+    return await _run_sync(
+        _add_class_sync,
         title=title,
         definition=definition,
         usage_note=usage_note,
@@ -78,7 +87,6 @@ async def _add_class(
     )
 
 
-@_identity
 async def _add_attribute(
     class_name: str,
     attr_label: str,
@@ -91,7 +99,8 @@ async def _add_attribute(
     user: str = "",
     name: str = "",
 ) -> dict:
-    return await add_attribute(
+    return await _run_sync(
+        _add_attribute_sync,
         class_name=class_name,
         attr_label=attr_label,
         attr_definition=attr_definition,
@@ -105,7 +114,6 @@ async def _add_attribute(
     )
 
 
-@_identity
 async def _add_connector(
     source_name: str,
     target_name: str,
@@ -121,7 +129,8 @@ async def _add_connector(
     user: str = "",
     name: str = "",
 ) -> dict:
-    return await add_connector(
+    return await _run_sync(
+        _add_connector_sync,
         source_name=source_name,
         target_name=target_name,
         rel_label=rel_label,
