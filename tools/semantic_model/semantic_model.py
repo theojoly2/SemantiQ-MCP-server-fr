@@ -1942,13 +1942,14 @@ def add_attribute(
         g.add((prop_uri, RDF.type, OWL.ObjectProperty))
         target_uri = find_class_by_label(g, attr_type)
         if not target_uri:
+            attr_type = attr_type or ""
             if "://" in attr_type or attr_type.startswith("urn:"):
                 target_uri = URIRef(attr_type)
             else:
                 target_uri = URIRef(f"urn:class:{_slugify_uri(attr_type)}")
             g.add((target_uri, RDF.type, OWL.Class))
             _set_literal(g, target_uri, RDFS.label, attr_type, lang="fr")
-        
+
         _set_uri(g, prop_uri, RDFS.range, target_uri)
 
     model = _sync_model_from_graph(
