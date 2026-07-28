@@ -14,16 +14,16 @@ from typing import Any
 from config import config
 from resources.semantic_model.utils import MODELS_PATH
 from tools.semantic_model.semantic_model import (
-    add_attribute,
-    add_class,
-    add_connector,
+    add_attribute as _add_attribute_sync,
+    add_class as _add_class_sync,
+    add_connector as _add_connector_sync,
     get_model as _get_model_file,
     load_full_model,
     upload_model as _upload_model_file,
 )
 
 
-ai_thread_pool = ThreadPoolExecutor(max_workers=2)
+ai_thread_pool = ThreadPoolExecutor(max_workers=4)
 
 
 def _sanitize(value: str, default: str) -> str:
@@ -117,6 +117,88 @@ async def delete_model(user: str = "", name: str = "") -> dict[str, Any]:
     if fp.exists():
         fp.unlink()
     return {"ok": True}
+
+
+async def add_class(title: str, definition: str, usage_note: str, user: str = "", name: str = "", package: str | None = None, uri: str | None = None) -> dict[str, Any]:
+    """Add a class to a persisted semantic model."""
+    loop = asyncio.get_running_loop()
+    func = functools.partial(
+        _add_class_sync,
+        title=title,
+        definition=definition,
+        usage_note=usage_note,
+        user=user,
+        name=name,
+        package=package,
+        uri=uri,
+    )
+    return await loop.run_in_executor(ai_thread_pool, func)
+
+
+async def add_attribute(
+    class_name: str,
+    attr_label: str,
+    attr_definition: str,
+    attr_uri: str,
+    attr_usage_note: str = "",
+    attr_type: str | None = "",
+    lower_bounds: str = "",
+    upper_bounds: str = "",
+    user: str = "",
+    name: str = "",
+) -> dict[str, Any]:
+    """Add an attribute to a class in a persisted semantic model."""
+    loop = asyncio.get_running_loop()
+    func = functools.partial(
+        _add_attribute_sync,
+        class_name=class_name,
+        attr_label=attr_label,
+        attr_definition=attr_definition,
+        attr_uri=attr_uri,
+        attr_usage_note=attr_usage_note,
+        attr_type=attr_type,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        user=user,
+        name=name,
+    )
+    return await loop.run_in_executor(ai_thread_pool, func)
+
+
+async def add_connector(
+    source_name: str,
+    target_name: str,
+    rel_label: str,
+    rel_definition: str,
+    rel_uri: str,
+    relationship: str,
+    lb: str = "",
+    rb: str = "",
+    lt: str = "",
+    rt: str = "",
+    rel_usage_note: str = "",
+    user: str = "",
+    name: str = "",
+) -> dict[str, Any]:
+    """Add a connector between two classes in a persisted semantic model."""
+    loop = asyncio.get_running_loop()
+    func = functools.partial(
+        _add_connector_sync,
+        source_name=source_name,
+        target_name=target_name,
+        rel_label=rel_label,
+        rel_definition=rel_definition,
+        rel_uri=rel_uri,
+        relationship=relationship,
+        lb=lb,
+        rb=rb,
+        lt=lt,
+        rt=rt,
+        rel_usage_note=rel_usage_note,
+        user=user,
+        name=name,
+    )
+    return await loop.run_in_executor(ai_thread_pool, func)
 
 
 __all__ = [

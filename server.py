@@ -108,63 +108,63 @@ if tools.get_document_file is not None:
 
 mcp.add_tool(
     Tool.from_function(
-        tools._upload_model,
+        tools.upload_model,
         name="upload_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._get_model,
+        tools.get_model,
         name="get_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._touch_model,
+        tools.touch_model,
         name="touch_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._list_models,
+        tools.list_models,
         name="list_models",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._rename_model,
+        tools.rename_model,
         name="rename_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._delete_model,
+        tools.delete_model,
         name="delete_model",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._add_class,
+        tools.add_class,
         name="add_class",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._add_attribute,
+        tools.add_attribute,
         name="add_attribute",
     )
 )
 
 mcp.add_tool(
     Tool.from_function(
-        tools._add_connector,
+        tools.add_connector,
         name="add_connector",
     )
 )
