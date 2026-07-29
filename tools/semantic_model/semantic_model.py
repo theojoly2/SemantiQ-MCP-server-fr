@@ -1833,11 +1833,12 @@ def add_class(
     name: str = "",
     package: str | None = None,
     uri: str | None = None,
+    file_name: str = "",
 ) -> dict[str, Any]:
-    print(f"[DEBUG add_class] Début add_class : title='{title}', uri='{uri}', user='{user}', name='{name}'")
+    print(f"[DEBUG add_class] Début add_class : title='{title}', uri='{uri}', user='{user}', name='{name}', file_name='{file_name}'")
     package = package or ""
 
-    fp = ensure_model_exists(user=user, name=name)
+    fp = ensure_model_exists(user=user, name=file_name or name)
     model = _load_model(fp)
     model = _ensure_synchronized(model, user, name)
     g = graph_from_model(model, user=user, name=name or "Generated")
@@ -1854,7 +1855,7 @@ def add_class(
             keep_raw=False,
             update_elements=True,
         )
-        _save_model(fp, model, user=user, name=name)
+        _save_model(fp, model, user=user, name=file_name or name)
         return _find_class_result(model, title=title) or {
             "error": f"La classe '{title}' existe déjà."
         }
@@ -1883,7 +1884,7 @@ def add_class(
         keep_raw=False,
         update_elements=True,
     )
-    model = _save_model(fp, model, user=user, name=name)
+    model = _save_model(fp, model, user=user, name=file_name or name)
 
     result = _find_class_result(model, title=title)
     print(f"[DEBUG add_class] Résultat renvoyé après ajout : {bool(result)}")
@@ -1903,9 +1904,10 @@ def add_attribute(
     upper_bounds: str = "",
     user: str = "",
     name: str = "",
+    file_name: str = "",
 ) -> dict[str, Any]:
-    print(f"[DEBUG add_attribute] Début add_attribute : class_name='{class_name}', attr_label='{attr_label}', attr_uri='{attr_uri}'")
-    fp = ensure_model_exists(user=user, name=name)
+    print(f"[DEBUG add_attribute] Début add_attribute : class_name='{class_name}', attr_label='{attr_label}', attr_uri='{attr_uri}', file_name='{file_name}'")
+    fp = ensure_model_exists(user=user, name=file_name or name)
     model = _load_model(fp)
     model = _ensure_synchronized(model, user, name)
     g = graph_from_model(model, user=user, name=name or "Generated")
@@ -1960,7 +1962,7 @@ def add_attribute(
         keep_raw=False,
         update_elements=True,
     )
-    model = _save_model(fp, model, user=user, name=name)
+    model = _save_model(fp, model, user=user, name=file_name or name)
 
     result = _find_attribute_result(
         model,
@@ -1988,9 +1990,10 @@ def add_connector(
     rel_usage_note: str = "",
     user: str = "",
     name: str = "",
+    file_name: str = "",
 ) -> dict[str, Any]:
-    print(f"[DEBUG add_connector] Début add_connector : source='{source_name}', target='{target_name}', label='{rel_label}', type='{relationship}'")
-    fp = ensure_model_exists(user=user, name=name)
+    print(f"[DEBUG add_connector] Début add_connector : source='{source_name}', target='{target_name}', label='{rel_label}', type='{relationship}', file_name='{file_name}'")
+    fp = ensure_model_exists(user=user, name=file_name or name)
     model = _load_model(fp)
     model = _ensure_synchronized(model, user, name)
     g = graph_from_model(model, user=user, name=name or "Generated")
@@ -2073,7 +2076,7 @@ def add_connector(
         keep_raw=False,
         update_elements=True,
     )
-    model = _save_model(fp, model, user=user, name=name)
+    model = _save_model(fp, model, user=user, name=file_name or name)
 
     result = _find_connector_result(
         model,

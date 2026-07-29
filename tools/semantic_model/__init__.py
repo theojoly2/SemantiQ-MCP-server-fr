@@ -135,6 +135,7 @@ async def add_class(title: str, definition: str, usage_note: str, user: str = ""
         name=display_name,
         package=package,
         uri=uri,
+        file_name=name,
     )
     return await loop.run_in_executor(ai_thread_pool, func)
 
@@ -167,6 +168,7 @@ async def add_attribute(
         upper_bounds=upper_bounds,
         user=user,
         name=display_name,
+        file_name=name,
     )
     return await loop.run_in_executor(ai_thread_pool, func)
 
@@ -205,6 +207,7 @@ async def add_connector(
         rel_usage_note=rel_usage_note,
         user=user,
         name=display_name,
+        file_name=name,
     )
     return await loop.run_in_executor(ai_thread_pool, func)
 
