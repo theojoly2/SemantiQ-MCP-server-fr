@@ -228,20 +228,16 @@ if tools.style_guide_check is not None:
 
 
 # --- ENREGISTREMENT DES RESSOURCES MCP ---
-@resources.get_model.register
-def _(mcp_instance: FastMCP):
-    @mcp_instance.resource("resource://model/{user}/{session_name}")
-    async def get_model_resource(user: str, session_name: str) -> str:
-        import json
-        data = resources.get_model(user, session_name)
-        return json.dumps(data, ensure_ascii=False, indent=2)
+@mcp.resource("resource://model/{user}/{session_name}")
+async def get_model_resource(user: str, session_name: str) -> str:
+    import json
+    data = resources.get_model(user, session_name)
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-@resources.get_style_guide.register
-def _(mcp_instance: FastMCP):
-    @mcp_instance.resource("resource://Style_Guide")
-    async def get_style_guide_resource() -> str:
-        return await resources.get_style_guide()
+@mcp.resource("resource://Style_Guide")
+async def get_style_guide_resource() -> str:
+    return await resources.get_style_guide()
 
 
 event_store = EventStore()
