@@ -14,13 +14,25 @@ from typing import Any
 from config import config
 from resources.semantic_model.utils import MODELS_PATH
 from tools.semantic_model.semantic_model import (
+    OWL,
+    RDF,
+    RDFS,
+    URIRef,
+    add_attribute as _add_attribute_sync,
+    add_class as _add_class_sync,
+    add_connector as _add_connector_sync,
+    _ensure_synchronized,
     get_model as _get_model_file,
+    graph_from_model,
     load_full_model,
+    _save_model as _save_model_file,
+    _set_literal,
+    _sync_model_from_graph,
     upload_model as _upload_model_file,
 )
 
 
-ai_thread_pool = ThreadPoolExecutor(max_workers=2)
+ai_thread_pool = ThreadPoolExecutor(max_workers=4)
 
 
 def _sanitize(value: str, default: str) -> str:
@@ -31,6 +43,17 @@ def _sanitize(value: str, default: str) -> str:
 
 def _model_path(user: str, name: str) -> Path:
     return Path(MODELS_PATH) / _sanitize(user, "default") / f"{_sanitize(name, 'generated')}.json"
+
+
+def _display_name_from_model(model: dict[str, Any], file_name: str) -> str:
+    """Return the human-readable model name stored in the JSON, never the technical file name."""
+    json_name = (model or {}).get("name") or ""
+    json_name = json_name.strip()
+    if json_name:
+        return json_name
+    if "__" in file_name:
+        return file_name.rsplit("__", 1)[0]
+    return file_name or "Generated"
 
 
 async def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[str, Any]:
@@ -88,7 +111,7 @@ async def list_models(user: str = "") -> dict[str, Any]:
 
 
 async def rename_model(user: str = "", old_name: str = "", new_name: str = "") -> dict[str, Any]:
-    """Rename a persisted model file."""
+    """Rename a persisted model file and update the embedded display name/package."""
     old_fp = _model_path(user, old_name)
     if not old_fp.exists():
         return {"error": f"Model {old_name} not found"}
@@ -96,16 +119,54 @@ async def rename_model(user: str = "", old_name: str = "", new_name: str = "") -
     if new_fp.exists():
         return {"error": f"Model {new_name} already exists"}
     old_fp.rename(new_fp)
-    # update embedded name key if present
+
+    display_name = new_name
+    if "__" in new_name:
+        display_name = new_name.rsplit("__", 1)[0]
+
+    old_display_name = old_name
+    if "__" in old_name:
+        old_display_name = old_name.rsplit("__", 1)[0]
+
     try:
-        model = load_full_model(user=user, name=new_name)
-        model["name"] = new_name
-        loop = asyncio.get_running_loop()
-        func = functools.partial(_upload_model_file, model=model, user=user, name=new_name)
-        await loop.run_in_executor(ai_thread_pool, func)
+        model = _get_model_file(user=user, name=new_name)
+        if isinstance(model, dict):
+            model["name"] = display_name
+            # Rename the root package(s) that used the old display name so the
+            # rebuilt RDF/package uses the new display name everywhere.
+            for key in ("elements", "xmi"):
+                container = model.get(key)
+                if isinstance(container, dict):
+                    container = container.get("elements", [])
+                if not isinstance(container, list):
+                    continue
+                for el in container:
+                    if isinstance(el, dict) and el.get("type") == "uml:Package" and el.get("name") == old_display_name:
+                        el["name"] = display_name
+            # Drop the cached RDF so the model is rebuilt from the xmi view using
+            # the new display name as the package/ontology label.
+            model.pop("ttl_raw", None)
+            model.pop("ttl", None)
+            g = graph_from_model(model, user=user, name=display_name)
+            onto = next(g.subjects(RDF.type, OWL.Ontology), None)
+            if isinstance(onto, URIRef):
+                _set_literal(g, onto, RDFS.label, display_name, lang="fr")
+            source_format = (model.get("source_format") or "ttl").lower()
+            model = _sync_model_from_graph(
+                g,
+                model,
+                package_name=display_name,
+                source_format=source_format,
+                keep_raw=False,
+                update_elements=True,
+            )
+            loop = asyncio.get_running_loop()
+            func = functools.partial(_save_model_file, _model_path(user, new_name), model, user, new_name)
+            await loop.run_in_executor(ai_thread_pool, func)
     except Exception:
         pass
-    return {"ok": True, "name": new_name}
+
+    return {"ok": True, "name": new_name, "display_name": display_name}
 
 
 async def delete_model(user: str = "", name: str = "") -> dict[str, Any]:
@@ -116,6 +177,97 @@ async def delete_model(user: str = "", name: str = "") -> dict[str, Any]:
     return {"ok": True}
 
 
+async def add_class(title: str, definition: str, usage_note: str, user: str = "", name: str = "", package: str | None = None, uri: str | None = None) -> dict[str, Any]:
+    """Add a class to a persisted semantic model."""
+    loop = asyncio.get_running_loop()
+    model = await get_model(user=user, name=name)
+    display_name = _display_name_from_model(model, name)
+    func = functools.partial(
+        _add_class_sync,
+        title=title,
+        definition=definition,
+        usage_note=usage_note,
+        user=user,
+        name=display_name,
+        package=package,
+        uri=uri,
+        file_name=name,
+    )
+    return await loop.run_in_executor(ai_thread_pool, func)
+
+
+async def add_attribute(
+    class_name: str,
+    attr_label: str,
+    attr_definition: str,
+    attr_uri: str,
+    attr_usage_note: str = "",
+    attr_type: str | None = "",
+    lower_bounds: str = "",
+    upper_bounds: str = "",
+    user: str = "",
+    name: str = "",
+) -> dict[str, Any]:
+    """Add an attribute to a class in a persisted semantic model."""
+    loop = asyncio.get_running_loop()
+    model = await get_model(user=user, name=name)
+    display_name = _display_name_from_model(model, name)
+    func = functools.partial(
+        _add_attribute_sync,
+        class_name=class_name,
+        attr_label=attr_label,
+        attr_definition=attr_definition,
+        attr_uri=attr_uri,
+        attr_usage_note=attr_usage_note,
+        attr_type=attr_type,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        user=user,
+        name=display_name,
+        file_name=name,
+    )
+    return await loop.run_in_executor(ai_thread_pool, func)
+
+
+async def add_connector(
+    source_name: str,
+    target_name: str,
+    rel_label: str,
+    rel_definition: str,
+    rel_uri: str,
+    relationship: str,
+    lb: str = "",
+    rb: str = "",
+    lt: str = "",
+    rt: str = "",
+    rel_usage_note: str = "",
+    user: str = "",
+    name: str = "",
+) -> dict[str, Any]:
+    """Add a connector between two classes in a persisted semantic model."""
+    loop = asyncio.get_running_loop()
+    model = await get_model(user=user, name=name)
+    display_name = _display_name_from_model(model, name)
+    func = functools.partial(
+        _add_connector_sync,
+        source_name=source_name,
+        target_name=target_name,
+        rel_label=rel_label,
+        rel_definition=rel_definition,
+        rel_uri=rel_uri,
+        relationship=relationship,
+        lb=lb,
+        rb=rb,
+        lt=lt,
+        rt=rt,
+        rel_usage_note=rel_usage_note,
+        user=user,
+        name=display_name,
+        file_name=name,
+    )
+    return await loop.run_in_executor(ai_thread_pool, func)
+
+
 __all__ = [
     "upload_model",
     "get_model",
@@ -123,4 +275,7 @@ __all__ = [
     "list_models",
     "rename_model",
     "delete_model",
+    "add_class",
+    "add_attribute",
+    "add_connector",
 ]

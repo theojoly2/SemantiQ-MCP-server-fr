@@ -15,6 +15,10 @@ from .semantic_model import touch_model
 from .semantic_model import list_models
 from .semantic_model import rename_model
 from .semantic_model import delete_model
+from .semantic_model import add_class
+from .semantic_model import add_attribute
+from .semantic_model import add_connector
+
 
 __all__ = [
     "retrieve_search_documents",
@@ -27,4 +31,7 @@ __all__ = [
     "list_models",
     "rename_model",
     "delete_model",
+    "add_class",
+    "add_attribute",
+    "add_connector",
 ]
