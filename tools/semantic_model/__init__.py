@@ -14,11 +14,20 @@ from typing import Any
 from config import config
 from resources.semantic_model.utils import MODELS_PATH
 from tools.semantic_model.semantic_model import (
+    OWL,
+    RDF,
+    RDFS,
+    URIRef,
     add_attribute as _add_attribute_sync,
     add_class as _add_class_sync,
     add_connector as _add_connector_sync,
+    _ensure_synchronized,
     get_model as _get_model_file,
+    graph_from_model,
     load_full_model,
+    _save_model as _save_model_file,
+    _set_literal,
+    _sync_model_from_graph,
     upload_model as _upload_model_file,
 )
 
@@ -102,7 +111,7 @@ async def list_models(user: str = "") -> dict[str, Any]:
 
 
 async def rename_model(user: str = "", old_name: str = "", new_name: str = "") -> dict[str, Any]:
-    """Rename a persisted model file."""
+    """Rename a persisted model file and update the embedded display name/package."""
     old_fp = _model_path(user, old_name)
     if not old_fp.exists():
         return {"error": f"Model {old_name} not found"}
@@ -110,7 +119,54 @@ async def rename_model(user: str = "", old_name: str = "", new_name: str = "") -
     if new_fp.exists():
         return {"error": f"Model {new_name} already exists"}
     old_fp.rename(new_fp)
-    return {"ok": True, "name": new_name}
+
+    display_name = new_name
+    if "__" in new_name:
+        display_name = new_name.rsplit("__", 1)[0]
+
+    old_display_name = old_name
+    if "__" in old_name:
+        old_display_name = old_name.rsplit("__", 1)[0]
+
+    try:
+        model = _get_model_file(user=user, name=new_name)
+        if isinstance(model, dict):
+            model["name"] = display_name
+            # Rename the root package(s) that used the old display name so the
+            # rebuilt RDF/package uses the new display name everywhere.
+            for key in ("elements", "xmi"):
+                container = model.get(key)
+                if isinstance(container, dict):
+                    container = container.get("elements", [])
+                if not isinstance(container, list):
+                    continue
+                for el in container:
+                    if isinstance(el, dict) and el.get("type") == "uml:Package" and el.get("name") == old_display_name:
+                        el["name"] = display_name
+            # Drop the cached RDF so the model is rebuilt from the xmi view using
+            # the new display name as the package/ontology label.
+            model.pop("ttl_raw", None)
+            model.pop("ttl", None)
+            g = graph_from_model(model, user=user, name=display_name)
+            onto = next(g.subjects(RDF.type, OWL.Ontology), None)
+            if isinstance(onto, URIRef):
+                _set_literal(g, onto, RDFS.label, display_name, lang="fr")
+            source_format = (model.get("source_format") or "ttl").lower()
+            model = _sync_model_from_graph(
+                g,
+                model,
+                package_name=display_name,
+                source_format=source_format,
+                keep_raw=False,
+                update_elements=True,
+            )
+            loop = asyncio.get_running_loop()
+            func = functools.partial(_save_model_file, _model_path(user, new_name), model, user, new_name)
+            await loop.run_in_executor(ai_thread_pool, func)
+    except Exception:
+        pass
+
+    return {"ok": True, "name": new_name, "display_name": display_name}
 
 
 async def delete_model(user: str = "", name: str = "") -> dict[str, Any]:
