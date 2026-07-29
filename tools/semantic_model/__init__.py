@@ -99,15 +99,6 @@ async def rename_model(user: str = "", old_name: str = "", new_name: str = "") -
     if new_fp.exists():
         return {"error": f"Model {new_name} already exists"}
     old_fp.rename(new_fp)
-    # update embedded name key if present
-    try:
-        model = load_full_model(user=user, name=new_name)
-        model["name"] = new_name
-        loop = asyncio.get_running_loop()
-        func = functools.partial(_upload_model_file, model=model, user=user, name=new_name)
-        await loop.run_in_executor(ai_thread_pool, func)
-    except Exception:
-        pass
     return {"ok": True, "name": new_name}
 
 
