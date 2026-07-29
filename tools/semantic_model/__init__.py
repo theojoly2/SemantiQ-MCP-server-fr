@@ -36,6 +36,17 @@ def _model_path(user: str, name: str) -> Path:
     return Path(MODELS_PATH) / _sanitize(user, "default") / f"{_sanitize(name, 'generated')}.json"
 
 
+def _display_name_from_model(model: dict[str, Any], file_name: str) -> str:
+    """Return the human-readable model name stored in the JSON, never the technical file name."""
+    json_name = (model or {}).get("name") or ""
+    json_name = json_name.strip()
+    if json_name:
+        return json_name
+    if "__" in file_name:
+        return file_name.rsplit("__", 1)[0]
+    return file_name or "Generated"
+
+
 async def upload_model(model: dict[str, Any], user: str = "", name: str = "") -> dict[str, Any]:
     """Persist a semantic model as JSON under resources/semantic_model/models/{user}/{name}.json."""
     loop = asyncio.get_running_loop()
@@ -113,13 +124,15 @@ async def delete_model(user: str = "", name: str = "") -> dict[str, Any]:
 async def add_class(title: str, definition: str, usage_note: str, user: str = "", name: str = "", package: str | None = None, uri: str | None = None) -> dict[str, Any]:
     """Add a class to a persisted semantic model."""
     loop = asyncio.get_running_loop()
+    model = await get_model(user=user, name=name)
+    display_name = _display_name_from_model(model, name)
     func = functools.partial(
         _add_class_sync,
         title=title,
         definition=definition,
         usage_note=usage_note,
         user=user,
-        name=name,
+        name=display_name,
         package=package,
         uri=uri,
     )
@@ -140,6 +153,8 @@ async def add_attribute(
 ) -> dict[str, Any]:
     """Add an attribute to a class in a persisted semantic model."""
     loop = asyncio.get_running_loop()
+    model = await get_model(user=user, name=name)
+    display_name = _display_name_from_model(model, name)
     func = functools.partial(
         _add_attribute_sync,
         class_name=class_name,
@@ -151,7 +166,7 @@ async def add_attribute(
         lower_bounds=lower_bounds,
         upper_bounds=upper_bounds,
         user=user,
-        name=name,
+        name=display_name,
     )
     return await loop.run_in_executor(ai_thread_pool, func)
 
@@ -173,6 +188,8 @@ async def add_connector(
 ) -> dict[str, Any]:
     """Add a connector between two classes in a persisted semantic model."""
     loop = asyncio.get_running_loop()
+    model = await get_model(user=user, name=name)
+    display_name = _display_name_from_model(model, name)
     func = functools.partial(
         _add_connector_sync,
         source_name=source_name,
@@ -187,7 +204,7 @@ async def add_connector(
         rt=rt,
         rel_usage_note=rel_usage_note,
         user=user,
-        name=name,
+        name=display_name,
     )
     return await loop.run_in_executor(ai_thread_pool, func)
 
