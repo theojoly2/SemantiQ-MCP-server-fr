@@ -987,4 +987,157 @@ CORRECT:
 - **Prefer short bilingual sentences over long keyword lists for search_terms**
 - **Explicitly encode new constraints (e.g., exclusions like 'sans aire-livraison.json') in search_terms when the user asks for different standards/models than previously returned**
 - **No prose outside JSON**
+
+# EXAMPLES - LANGUAGE-SENSITIVE PLANNING
+
+The following examples show how the final plan must be written in the user's language. Note how step descriptions, rationales, expected outputs, and notes change language while JSON keys, tool names, and URIs remain in English.
+
+## Example A - User writes in French
+
+Input:
+```json
+{
+  "user_question": "Je veux modéliser une voiture avec ses attributs principaux",
+  "user_info": {"provided_data_model": "no"},
+  "observations": [],
+  "executor_tools_for_final_plan": ["add_class", "add_attribute"]
+}
+```
+
+Output:
+```json
+{
+  "final_plan": {
+    "plan_steps": [
+      {
+        "step": "Proposer une structure de classe Véhicule avec les attributs courants (immatriculation, marque, modèle, année, couleur, type de motorisation)",
+        "needs_tool": false
+      },
+      {
+        "step": "Vérifier si des URI réutilisables existent dans les documents récupérés ; sinon, demander ou suggérer un namespace local",
+        "needs_tool": false
+      },
+      {
+        "step": "Créer la classe et les attributs dans le modèle utilisateur après validation des URI",
+        "needs_tool": true
+      }
+    ],
+    "tools_to_call": [
+      {
+        "step_index": 2,
+        "tool": "add_class",
+        "args_template": {
+          "title": "Voiture",
+          "definition": "Véhicule automobile à moteur destiné au transport de personnes",
+          "usage_note": "Classe représentant une voiture dans le modèle",
+          "uri": ""
+        },
+        "rationale": "La classe principale doit être créée avant d'ajouter ses attributs.",
+        "expected_output": "Une classe Voiture dans le modèle utilisateur"
+      }
+    ],
+    "resources_used": [],
+    "notes": "Aucun document récupéré. Les URI doivent être fournies ou confirmées par l'utilisateur avant mutation."
+  }
+}
+```
+
+## Example B - User writes in English
+
+Input:
+```json
+{
+  "user_question": "I want to model a car with its main attributes",
+  "user_info": {"provided_data_model": "no"},
+  "observations": [],
+  "executor_tools_for_final_plan": ["add_class", "add_attribute"]
+}
+```
+
+Output:
+```json
+{
+  "final_plan": {
+    "plan_steps": [
+      {
+        "step": "Propose a Car class structure with common attributes (registration plate, make, model, year, color, powertrain type)",
+        "needs_tool": false
+      },
+      {
+        "step": "Check whether reusable URIs exist in retrieved documents; otherwise ask for or suggest a local namespace",
+        "needs_tool": false
+      },
+      {
+        "step": "Create the class and its attributes in the user's model after URI validation",
+        "needs_tool": true
+      }
+    ],
+    "tools_to_call": [
+      {
+        "step_index": 2,
+        "tool": "add_class",
+        "args_template": {
+          "title": "Car",
+          "definition": "A motor vehicle used for transporting passengers",
+          "usage_note": "Class representing a car in the model",
+          "uri": ""
+        },
+        "rationale": "The main class must be created before adding its attributes.",
+        "expected_output": "A Car class in the user's model"
+      }
+    ],
+    "resources_used": [],
+    "notes": "No documents retrieved. URIs must be provided or confirmed by the user before any mutation."
+  }
+}
+```
+
+## Example C - User writes in French with a modelling request requiring retrieval
+
+Input:
+```json
+{
+  "user_question": "Quels standards existent pour modéliser une adresse postale ?",
+  "user_info": {"provided_data_model": "no"},
+  "observations": [],
+  "executor_tools_for_final_plan": ["retrieve_documents"]
+}
+```
+
+Output:
+```json
+{
+  "final_plan": {
+    "plan_steps": [
+      {
+        "step": "Rechercher les standards d'adresses postales dans la base de connaissances",
+        "needs_tool": true
+      },
+      {
+        "step": "Identifier les 2-3 standards les plus pertinents et rejeter les documents trop génériques",
+        "needs_tool": false
+      },
+      {
+        "step": "Expliquer comment ces standards peuvent être réutilisés pour modéliser une adresse",
+        "needs_tool": false
+      }
+    ],
+    "tools_to_call": [
+      {
+        "step_index": 0,
+        "tool": "retrieve_documents",
+        "args_template": {
+          "search_terms": "Je cherche des standards d'adresses postales pour modéliser rue, numéro, complément, code postal, ville, région et pays. ; I am looking for postal address standards that define street, house number, address line, postal code, city, region and country.",
+          "limit": 8,
+          "return_full_document": true
+        },
+        "rationale": "Recherche bilingue courte pour maximiser la couverture sémantique de la base documentaire.",
+        "expected_output": "Documents décrivant des standards d'adresses postales avec classes, propriétés et URI réutilisables"
+      }
+    ],
+    "resources_used": [],
+    "notes": "La réponse et le raisonnement sont en français car la question est en français. Seuls les search_terms restent bilingues pour améliorer la recherche."
+  }
+}
+```
 """
