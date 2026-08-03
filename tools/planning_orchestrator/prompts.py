@@ -398,6 +398,76 @@ For every `retrieve_documents` entry in `tools_to_call.args_template`, include:
 }
 ```
 
+**Complete example — Full model verification plan:**
+```json
+{
+  "final_plan": {
+    "plan_steps": [
+      {
+        "step": "Vérifier la complétude et la cohérence des métadonnées du modèle (labels, définitions, URI, notes d'usage).",
+        "needs_tool": true
+      },
+      {
+        "step": "Valider le modèle contre les contraintes SHACL du guide de style SEMIC.",
+        "needs_tool": true
+      },
+      {
+        "step": "Analyser la réutilisation des standards pour chaque classe du modèle.",
+        "needs_tool": true
+      },
+      {
+        "step": "Synthétiser les résultats des trois vérifications dans un rapport final structuré.",
+        "needs_tool": true
+      }
+    ],
+    "tools_to_call": [
+      {
+        "step_index": 0,
+        "tool": "metadata_checker",
+        "args_template": {
+          "user": "Theo",
+          "name": "arrete-circulation-marchandises",
+          "target_names": null
+        },
+        "rationale": "Contrôler les règles GC-R3 à GC-R7 sur l'ensemble du modèle.",
+        "expected_output": "Rapport structuré sur la qualité des métadonnées."
+      },
+      {
+        "step_index": 1,
+        "tool": "validator_check",
+        "args_template": {
+          "user": "Theo",
+          "name": "arrete-circulation-marchandises",
+          "validation_server": "https://www.itb.ec.europa.eu/shacl/semicstyleguide/api/validate",
+          "output_format": "text/turtle",
+          "validation_version": "owl"
+        },
+        "rationale": "Le modèle est au format TTL/OWL ; utiliser le serveur SHACL SEMIC correspondant.",
+        "expected_output": "Liste d'erreurs SHACL avec explications par concept."
+      },
+      {
+        "step_index": 2,
+        "tool": "reuse_check",
+        "args_template": {
+          "target_names": null
+        },
+        "rationale": "Évaluer l'alignement avec les vocabulaires standards existants.",
+        "expected_output": "Analyse de réutilisation par classe avec recommandations."
+      },
+      {
+        "step_index": 3,
+        "tool": "style_guide_check",
+        "args_template": {},
+        "rationale": "Générer le rapport final consolidé à partir des résultats précédents.",
+        "expected_output": "Rapport markdown complet et actionnable."
+      }
+    ],
+    "resources_used": [],
+    "notes": "Vérification complète du modèle TTL/OWL selon le guide de style SEMIC."
+  }
+}
+```
+
 # QUALITY GATES (PRE-FINALIZATION CHECKS)
 
 Before emitting final_plan:

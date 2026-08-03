@@ -165,7 +165,29 @@ async def plan_workflow_with_tools(
         messages.append("Return JSON with either {'action': {...}} or {'final_plan': {...}} only.")
         step += 1
 
-    # 4) Fallback after budget: return best-effort plan
+    # 4) Fallback after budget: try once more with an explicit JSON-only reminder.
+    final_attempt = await ctx.sample(
+        messages=messages + ["You have reached the step budget. Output ONLY a valid JSON object containing {\"final_plan\": {...}}. Do not add explanations, markdown, or comments."],
+        system_prompt=system_prompt_orchestrator,
+        temperature=0.0,
+        max_tokens=1200,
+    )
+    final_text = getattr(final_attempt, "text", str(final_attempt))
+    final_match = re.search(r"\{.*\}", final_text, re.S)
+    try:
+        final_obj = json.loads(final_match.group(0) if final_match else final_text)
+        if "final_plan" in final_obj:
+            plan = final_obj["final_plan"]
+            plan.setdefault("plan_steps", [])
+            plan.setdefault("tools_to_call", [])
+            plan.setdefault("resources_used", [])
+            plan.setdefault("notes", "")
+            plan["debug_trace"] = scratch
+            return plan
+    except Exception:
+        pass
+
+    # 5) True fallback after budget: return best-effort plan
     return {
         "plan_steps": ["No finalization within step budget; returning partial notes."],
         "tools_to_call": [],
