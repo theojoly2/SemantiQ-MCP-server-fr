@@ -9,6 +9,7 @@ async def style_guide_check(
     validator_check: dict = None,
     metadata_checks: dict = None,
     reuse_checks: dict = None,
+    language: str = "fr",
 ) -> dict:
 
     """Generates a structured semantic interoperability assessment report for a data model using LLM summarization."""
@@ -22,9 +23,15 @@ async def style_guide_check(
     if reuse_checks is None:
         reuse_checks = {}
 
-    # Fixed report structure
+    language = (language or "fr").strip().lower() or "fr"
+    lang_instruction = {
+        "fr": "Rédige TOUJOURS en français. Les titres, les explications, les exemples et les recommandations doivent être en français.",
+        "en": "Write ALWAYS in English.",
+    }.get(language, f"Rédige TOUJOURS en {language}.")
+
+    # Fixed report structure (French by default, English handled via instruction)
     report_template = (
-        "# Semantic Style Guide Assessment Report\n\n"
+        "# Rapport d'évaluation du guide de style sémantique\n\n"
         "{{validation_section}}\n\n"
         "{{metadata_section}}\n\n"
         "{{reuse_section}}\n"
@@ -32,40 +39,60 @@ async def style_guide_check(
 
     # Compose the validator section prompt
     validator_prompt = (
-        "You are a semantic data modeling expert. Given the following checks of a data model against the SEMIC style guide validator, "
-        "write a summary for the section 'Validation against the ITB validator' as follows: For each rule that was not respected, create a subsection with the rule name or identifier as the heading. In each subsection, provide: (1) a summary explaining the error noted, (2) if available, an example from the data model illustrating the error, (3) a clear suggestion for how to solve the error, and (4) a list of problematic concepts or elements. Use only the information found in validator_checks. Structure the output in markdown.\n\n"
-        f"Validator checks input:\n{json.dumps(validator_check, indent=2, ensure_ascii=False)}"
+        "Tu es un expert en modélisation de données sémantiques. À partir des vérifications suivantes d'un modèle de données "
+        "par rapport au validateur du guide de style SEMIC, rédige un résumé pour la section 'Validation par rapport au validateur ITB' "
+        "comme suit : pour chaque règle non respectée, crée une sous-section avec le nom ou l'identifiant de la règle comme titre. "
+        "Dans chaque sous-section, indique : (1) un résumé expliquant l'erreur constatée, (2) si disponible, un exemple du modèle de données "
+        "illustrant l'erreur, (3) une suggestion claire pour corriger l'erreur, et (4) une liste des concepts ou éléments problématiques. "
+        "Utilise uniquement les informations présentes dans validator_checks. Structure le résultat en markdown. "
+        f"{lang_instruction}\n\n"
+        f"Données de validation fournies :\n{json.dumps(validator_check, indent=2, ensure_ascii=False)}"
     )
-    
+
     # Compose the metadata section prompt
     metadata_prompt = (
-        f"You are a semantic data modeling expert. Given the following checks of a data model against a set of SEMIC style guide conventions: {metadata_conventions} \n"
-        "Write a summary for the metadata quality section as follows: For each convention that was not respected, create a subsection with the convention name as the heading. In each subsection, provide: (1) a summary explaining the error noted, (2) if available, an example from the data model illustrating the error, (3) a clear suggestion for how to solve the error, and (4) a list of problematic concepts or elements. Use only the information found in metadata_checks. Structure the output in markdown.\n\n"
-        f"Metadata checks input:\n{json.dumps(metadata_checks, indent=2, ensure_ascii=False)}"
+        f"Tu es un expert en modélisation de données sémantiques. À partir des vérifications suivantes d'un modèle de données "
+        f"par rapport aux conventions du guide de style SEMIC : {metadata_conventions} \n"
+        "rédige un résumé pour la section 'Qualité des métadonnées' comme suit : pour chaque convention non respectée, "
+        "crée une sous-section avec le nom de la convention comme titre. Dans chaque sous-section, indique : (1) un résumé "
+        "expliquant l'erreur constatée, (2) si disponible, un exemple du modèle de données illustrant l'erreur, (3) une suggestion "
+        "claire pour corriger l'erreur, et (4) une liste des concepts ou éléments problématiques. Utilise uniquement les informations "
+        f"présentes dans metadata_checks. Structure le résultat en markdown. {lang_instruction}\n\n"
+        f"Données de vérification des métadonnées fournies :\n{json.dumps(metadata_checks, indent=2, ensure_ascii=False)}"
     )
 
     # Compose the reuse section prompt
     reuse_prompt = (
-        f"You are a semantic interoperability expert. Given the following reuse checks for each class against a set of SEMIC style guide conventions: {reuse_conventions} \n"
-        "Write a summary for the reuse of standards section as follows: For each convention that was not respected, create a subsection with the convention name as the heading. In each subsection, provide: (1) a summary explaining the error noted, (2) if available, an example from the data model illustrating the error, (3) a clear suggestion for how to solve the error, and (4) a list of problematic concepts or elements. Use only the information found in reuse_checks. Structure the output in markdown.\n\n"
-        f"Reuse checks input:\n{json.dumps(reuse_checks, indent=2, ensure_ascii=False)}"
+        f"Tu es un expert en interopérabilité sémantique. À partir des vérifications de réutilisation suivantes pour chaque classe "
+        f"par rapport aux conventions du guide de style SEMIC : {reuse_conventions} \n"
+        "rédige un résumé pour la section 'Réutilisation des standards' comme suit : pour chaque convention non respectée, "
+        "crée une sous-section avec le nom de la convention comme titre. Dans chaque sous-section, indique : (1) un résumé "
+        "expliquant l'erreur constatée, (2) si disponible, un exemple du modèle de données illustrant l'erreur, (3) une suggestion "
+        "claire pour corriger l'erreur, et (4) une liste des concepts ou éléments problématiques. Utilise uniquement les informations "
+        f"présentes dans reuse_checks. Structure le résultat en markdown. {lang_instruction}\n\n"
+        f"Données de vérification de réutilisation fournies :\n{json.dumps(reuse_checks, indent=2, ensure_ascii=False)}"
+    )
+
+    system_prompt = (
+        "Tu es un expert en modélisation de données sémantiques rédigeant un rapport d'évaluation fondé sur des standards. "
+        f"{lang_instruction}"
     )
 
     # Get LLM summaries for each section
     if validator_check:
         validator_response = await ctx.sample(
             messages=[validator_prompt],
-            system_prompt="You are a semantic data modeling expert writing a standards-based assessment report.",
+            system_prompt=system_prompt,
             temperature=0.0,
             max_tokens=3000,
         )
-    else: 
+    else:
         validator_response = ""
-    
+
     if metadata_checks:
         metadata_response = await ctx.sample(
             messages=[metadata_prompt],
-            system_prompt="You are a semantic data modeling expert writing a standards-based assessment report.",
+            system_prompt=system_prompt,
             temperature=0.0,
             max_tokens=3000,
         )
@@ -75,7 +102,7 @@ async def style_guide_check(
     if reuse_checks:
         reuse_response = await ctx.sample(
             messages=[reuse_prompt],
-            system_prompt="You are a semantic interoperability expert writing a standards-based assessment report.",
+            system_prompt=system_prompt,
             temperature=0.0,
             max_tokens=3000,
         )
