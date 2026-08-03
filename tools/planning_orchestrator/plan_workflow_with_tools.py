@@ -5,6 +5,41 @@ from fastmcp import Context, Client
 from resources.semantic_model.utils import get_model
 from .prompts import system_prompt_orchestrator
 
+
+def _extract_json(text: str) -> str:
+    """Extract the first JSON object from a markdown-fenced or raw string."""
+    # 1) Try fenced ```json ... ``` or ``` ... ``` blocks
+    fenced = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.S | re.I)
+    if fenced:
+        candidate = fenced.group(1).strip()
+        if candidate.startswith("{"):
+            return candidate
+    # 2) Fallback: first { ... } block, balanced greedy captured by regex
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        return m.group(0)
+    # 3) Last resort: trim trailing explanations
+    if "{" in text and "}" in text:
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        return text[start:end]
+    return text
+
+
+def _normalize_json(raw: str) -> str:
+    """Sanitize common non-JSON escaping produced by LLMs (e.g. \\')."""
+    # Replace single-quote escapes inside double-quoted JSON strings.
+    # Using a naive regex that targets backslash-apostrophe pairs.
+    return re.sub(r"\\'", "'", raw)
+
+
+def _safe_json_loads(text: str):
+    """Extract and parse JSON with tolerant cleanup."""
+    raw = _extract_json(text)
+    raw = _normalize_json(raw)
+    return json.loads(raw)
+
+
 # -------- Planner tool that can CALL planning tools via an inner loop ----------
 async def plan_workflow_with_tools(
     user: str = "",
@@ -97,9 +132,8 @@ async def plan_workflow_with_tools(
         print("\n[DEBUG] Sample:\n", str(sample))
         text = getattr(sample, "text", str(sample))
 
-        m = re.search(r"\{.*\}", text, re.S)
         try:
-            obj = json.loads(m.group(0) if m else text)
+            obj = _safe_json_loads(text)
         except Exception:
             messages.append(f"Please return VALID JSON. Your last output was:\n{text[:2000]}")
             step += 1
@@ -173,9 +207,8 @@ async def plan_workflow_with_tools(
         max_tokens=1200,
     )
     final_text = getattr(final_attempt, "text", str(final_attempt))
-    final_match = re.search(r"\{.*\}", final_text, re.S)
     try:
-        final_obj = json.loads(final_match.group(0) if final_match else final_text)
+        final_obj = _safe_json_loads(final_text)
         if "final_plan" in final_obj:
             plan = final_obj["final_plan"]
             plan.setdefault("plan_steps", [])
