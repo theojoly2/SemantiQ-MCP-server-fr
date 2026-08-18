@@ -65,7 +65,7 @@ async def reuse_check(
                 # Collect class and its attributes
                 class_with_properties = dict(element)
                 class_with_properties["attributes"] = element.get("attributes", [])
-                docs = retrieve_documents(class_name, vocabularies or [], n_documents)
+                docs = retrieve_documents(class_name, tags=vocabularies or [], limit=n_documents)
                 prompt = {
                     "instruction": (
                         "You are a semantic interoperability expert. "
@@ -147,7 +147,7 @@ async def reuse_check(
                             properties.append(item)
             class_with_properties = dict(class_obj)
             class_with_properties["properties"] = properties
-            docs = retrieve_documents(label, vocabularies or [], n_documents)
+            docs = retrieve_documents(label, tags=vocabularies or [], limit=n_documents)
             prompt = {
                 "instruction": (
                     "You are a semantic interoperability expert. "
