@@ -9,6 +9,7 @@ import functools
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
 from fastmcp.server.event_store import EventStore
+import resources
 import tools
 
 # Désactive le parallélisme interne du Tokenizer HuggingFace pour éviter les deadlocks
@@ -168,6 +169,75 @@ mcp.add_tool(
         name="add_connector",
     )
 )
+
+if tools.retrieve_documents is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.retrieve_documents,
+            name="retrieve_documents",
+        )
+    )
+
+if tools.get_style_guide is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.get_style_guide,
+            name="get_style_guide",
+        )
+    )
+
+if tools.plan_workflow_with_tools is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.plan_workflow_with_tools,
+            name="plan_workflow_with_tools",
+        )
+    )
+
+if tools.metadata_checker is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.metadata_checker,
+            name="metadata_checker",
+        )
+    )
+
+if tools.reuse_check is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.reuse_check,
+            name="reuse_check",
+        )
+    )
+
+if tools.validator_check is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.validator_check,
+            name="validator_check",
+        )
+    )
+
+if tools.style_guide_check is not None:
+    mcp.add_tool(
+        Tool.from_function(
+            tools.style_guide_check,
+            name="style_guide_check",
+        )
+    )
+
+
+# --- ENREGISTREMENT DES RESSOURCES MCP ---
+@mcp.resource("resource://model/{user}/{session_name}")
+async def get_model_resource(user: str, session_name: str) -> str:
+    import json
+    data = resources.get_model(user, session_name)
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+@mcp.resource("resource://Style_Guide")
+async def get_style_guide_resource() -> str:
+    return await resources.get_style_guide()
 
 
 event_store = EventStore()
