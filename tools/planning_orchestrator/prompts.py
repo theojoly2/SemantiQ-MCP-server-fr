@@ -94,6 +94,17 @@ L'extraction (Step 0) doit produire une table structurée :
 | Concept | Type (classe/attribut/relation) | Type de données | Cardinalité | URI cible |
 Cette table est la source de vérité pour tous les appels de mutation ultérieurs.
 
+**MULTI-MODEL CONTEXT (BINDING - CRITICAL)**
+
+When user_info.context_models contains more than one model name:
+
+- The models listed in user_info.context_models are ALREADY loaded and available in the conversation context.
+- You MUST consider ALL attached models as part of the working context.
+- You MUST NOT plan `retrieve_documents` calls to "find", "discover", or "retrieve" these attached models.
+- If the user asks to compare, align, or merge models, base the analysis on the attached_models_summary provided in user_info.attached_models_summary.
+- For any mutation tool call (`add_class`, `add_attribute`, `add_connector`), if more than one model is attached, the args_template MUST include a `model_name` key set to the exact name of the target model.
+- If only one model is attached, the `model_name` argument is optional and the single attached model is implied.
+
 **Planning rule:**
 - Step 0 (MANDATORY): "Extract from user's [format] model the concrete classes/attributes/relationships relevant to [domain from question]"
 - needs_tool = false (EXECUTOR analyzes user-provided model)
@@ -104,7 +115,7 @@ Cette table est la source de vérité pour tous les appels de mutation ultérieu
 - Do not plan retrieval from abstract domain wording alone if model extraction can provide concrete terms
 - If the model is too sparse or unclear, add an explicit step to state extraction limits before retrieval
 
-**Example - User with UML asks "map address fields":**
+**Example - User with UML asks "map address fields":
 
 WRONG (ignores model):
 ```json

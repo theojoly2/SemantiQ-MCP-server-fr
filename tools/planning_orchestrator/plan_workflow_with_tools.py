@@ -43,7 +43,7 @@ def _safe_json_loads(text: str):
 # -------- Planner tool that can CALL planning tools via an inner loop ----------
 async def plan_workflow_with_tools(
     user: str = "",
-    name: str = "",
+    context_models: list[str] = None,
     user_question: str = "",
     ctx: Context = None,
     # Optional: allow the caller to pass a precomputed executor tool catalog (name+desc)
@@ -90,22 +90,30 @@ async def plan_workflow_with_tools(
     planning_allow = {t["name"] for t in planning_tools_visible}
 
     # 2) Build system + initial user messages for the planner agent
-    try: 
-        model = get_model(user, name) if user and name else {}
-        if model:
-            format = "ttl/owl" if "ttl" in model.keys() else "xmi/uml"
-    except Exception as e:
-        print("\n[ERROR] get_model failed:\n", str(e))
-        model = {}
+    context_models = [m.strip() for m in (context_models or []) if m.strip()]
+    loaded_models: list[dict[str, Any]] = []
+    primary_model_format = "unknown"
+    if user and context_models:
+        for model_name in context_models:
+            try:
+                model = get_model(user, model_name)
+                if model:
+                    if primary_model_format == "unknown":
+                        primary_model_format = "ttl/owl" if "ttl" in model.keys() else "xmi/uml"
+                    loaded_models.append({"name": model_name, "model": model})
+            except Exception as e:
+                print(f"\n[ERROR] get_model failed for {model_name}:\n", str(e))
+
+    attached_models_summary = _summarize_models(loaded_models)
 
     user_block = {
         "user_question": user_question,
         "user_info": {
             "user": user if user else "anonymous",
-            "name": name if name else "default",
-            # Potentially useful metadata about the data model
-            "provided_data_model": "yes" if model else "no",
-            "data_model_format": format if model else "unknown",
+            "context_models": context_models,
+            "provided_data_model": "yes" if loaded_models else "no",
+            "data_model_format": primary_model_format if loaded_models else "unknown",
+            "attached_models_summary": attached_models_summary,
             },
         "observations": observations or [],
         "planning_tools_you_can_call": planning_tools_visible,
@@ -230,6 +238,50 @@ async def plan_workflow_with_tools(
     }
 
 
+def _summarize_models(loaded_models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build compact summaries of attached models for the planner context."""
+    summaries: list[dict[str, Any]] = []
+    for entry in loaded_models:
+        name = entry.get("name", "")
+        model = entry.get("model") or {}
+        xmi = model.get("xmi") if isinstance(model.get("xmi"), dict) else model
+        elements = xmi.get("elements", []) if isinstance(xmi, dict) else []
+        connectors = xmi.get("connectors", []) if isinstance(xmi, dict) else []
+        classes = [
+            {
+                "name": el.get("name", ""),
+                "type": el.get("type", ""),
+                "uri": el.get("URI", ""),
+                "package": el.get("package", ""),
+            }
+            for el in elements
+            if el.get("type") in {"uml:Class", "owl:Class", "rdfs:Class", "Class"}
+        ]
+        attributes: list[dict[str, str]] = []
+        for el in elements:
+            for attr in el.get("attributes", []) or []:
+                attributes.append({
+                    "class": el.get("name", ""),
+                    "name": attr.get("name", ""),
+                    "type": attr.get("type", ""),
+                })
+            for prop in el.get("properties", []) or []:
+                attributes.append({
+                    "class": el.get("name", ""),
+                    "name": prop.get("name", ""),
+                    "type": prop.get("type", ""),
+                })
+        summaries.append({
+            "name": name,
+            "class_count": len(classes),
+            "attribute_count": len(attributes),
+            "connector_count": len(connectors),
+            "classes": classes[:30],
+            "attributes": attributes[:30],
+        })
+    return summaries
+
+
 plan_workflow_with_tools.__doc__ = f"""
     Tool for generating a step-by-step plan to answer a user's question using available planning and executor tools.
     The planner agent may call planning tools to discover or retrieve relevant information, and produces a structured plan
@@ -237,9 +289,12 @@ plan_workflow_with_tools.__doc__ = f"""
 
     Args:
         user (str, optional):
-            Identifier passed to `get_model` to locate the model. Defaults to "".
-        name (str, optional):
-            Model name passed to `get_model` to locate the model. Defaults to "".
+            Identifier used to locate models. Defaults to "".
+        context_models (list[str], optional):
+            List of model names already attached to the conversation context.
+            The planner MUST consider these models as available and already loaded.
+            Do NOT plan `retrieve_documents` calls to "find" these models.
+            For mutations, the plan must specify the target model_name in tool arguments if several models are attached.
         user_question (str):
             The user's original question to be answered by the plan.
 
